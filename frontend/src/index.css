@@ -1,0 +1,84 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-page text-ink font-sans antialiased;
+  font-size: 14px;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: #cfcabd;
+  border-radius: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@layer components {
+  .card {
+    @apply bg-white border border-line rounded-card;
+  }
+  .card-pad {
+    @apply bg-white border border-line rounded-card p-4;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 h-btn px-3 rounded-btn
+           border border-line bg-white text-ink font-sans text-[13px]
+           hover:border-ink-faint disabled:opacity-45 disabled:cursor-not-allowed
+           transition-colors whitespace-nowrap;
+  }
+  .btn-primary {
+    @apply btn bg-brand text-white border-brand hover:bg-brand-dark hover:border-brand-dark;
+  }
+  .btn-human {
+    @apply btn bg-human text-white border-human hover:bg-human-dark hover:border-human-dark;
+  }
+  .btn-lg {
+    @apply h-btnlg px-5 text-[14px];
+  }
+  .btn-sm {
+    @apply h-7 px-2 text-[12px];
+  }
+  .input {
+    @apply h-btn w-full px-3 rounded-btn border border-line bg-white text-[13px]
+           outline-none focus:border-brand focus:ring-2 focus:ring-brand/15;
+  }
+  .label {
+    @apply block text-[12px] text-ink-soft mb-1;
+  }
+  .tag {
+    @apply inline-flex items-center px-2 h-[22px] rounded-full text-[11px]
+           border border-line bg-page text-ink-soft whitespace-nowrap;
+  }
+  .tag-brand {
+    @apply tag bg-brand-soft border-brand-line text-brand-dark;
+  }
+  .tag-human {
+    @apply tag bg-human-soft border-human/30 text-human-dark;
+  }
+  .h-title {
+    @apply font-serif text-[17px] font-medium text-ink;
+  }
+  .h-sub {
+    @apply text-[12px] text-ink-faint;
+  }
+  .kbd {
+    @apply inline-flex items-center justify-center min-w-[22px] h-[22px] px-1
+           rounded-[6px] border border-line bg-page text-[11px] text-ink-soft;
+  }
+}
+
+.wave-bar {
+  background-image: linear-gradient(to top, #e3dfd6 0 30%, #0f5e57 30% 100%);
+}

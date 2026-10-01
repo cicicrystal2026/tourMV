@@ -1,0 +1,26 @@
+# 依赖
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# 环境与密钥
+.env
+
+# 数据（媒体文件与数据库不入库）
+data/*
+!data/.gitkeep
+!data/assets/
+!data/thumbs/
+!data/music/
+!data/renders/
+
+# 构建产物
+frontend/dist/
+*.log
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store

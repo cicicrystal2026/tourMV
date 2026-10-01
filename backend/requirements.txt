@@ -1,0 +1,24 @@
+# 核心依赖 —— 装完即可在 Mock 模式下（一个 Key 都不配）跑通全流程
+#
+# 关于 uvicorn 的 extras：官方推荐 `uvicorn[standard]`，它会额外带上
+# httptools / websockets / watchfiles / python-dotenv / pyyaml / colorama。
+# 这些都属于「性能与开发体验」增强，不是运行必需；在受限网络/离线环境下
+# 往往装不上，因此这里拆开写：只把 --reload 必需的 watchfiles 列为硬依赖。
+# 网络通畅时想装全量，可直接执行：pip install "uvicorn[standard]"
+fastapi>=0.110
+uvicorn>=0.30
+watchfiles>=0.23
+sqlalchemy>=2.0
+pydantic>=2.7
+python-multipart>=0.0.9
+requests>=2.31
+
+# 歌词强制对齐（音画同步的关键）。
+# 用 faster-whisper 而不是 whisperx：它是 CTranslate2 后端，**不需要 torch**，
+# Linux 上装完约 100MB（ctranslate2 38 + onnxruntime 23 + av 34 + tokenizers 3），
+# 不会拖进 nvidia-* 那一堆 CUDA 包。
+# 缺失时不影响启动：align.py 会自动回退到「按字数估算」并在界面标注。
+numpy>=1.26
+faster-whisper>=1.1
+# 繁简归一化：Whisper 的中文输出常是繁体，不转换会让字符匹配大面积落空
+opencc-python-reimplemented>=0.1.7
