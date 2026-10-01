@@ -36,10 +36,19 @@ export default function Dashboard() {
     }
   }, [])
 
+  // setTimeout 链：上一轮没回来不发下一轮（V1.0 用 setInterval，后端慢时请求层层堆积）
   useEffect(() => {
-    load()
-    const t = setInterval(load, 6000)
-    return () => clearInterval(t)
+    let alive = true
+    let t: number | undefined
+    const tick = async () => {
+      await load()
+      if (alive) t = window.setTimeout(tick, 6000)
+    }
+    tick()
+    return () => {
+      alive = false
+      if (t) clearTimeout(t)
+    }
   }, [load])
 
   if (err && !data) return <div className="p-6"><Banner tone="error">{err}</Banner></div>
@@ -51,6 +60,13 @@ export default function Dashboard() {
     )
 
   const cards = data.cards
+  // 「一屏全是完成」对决策没有帮助：进行中 / 排队 / 失败排前面，24 小时前完成的不显示
+  const DAY = 24 * 3600 * 1000
+  const rank: Record<string, number> = { running: 0, queued: 1, failed: 2, done: 3 }
+  const queue = [...data.gpu_queue]
+    .filter((j: any) => j.status !== 'done' || Date.now() - new Date(j.finished_at || j.created_at).getTime() < DAY)
+    .sort((a: any, b: any) => (rank[a.status] ?? 9) - (rank[b.status] ?? 9))
+  const selModels = data.models.filter((m: any) => m.in_selection)
 
   return (
     <>
@@ -192,7 +208,9 @@ export default function Dashboard() {
                             nav(
                               t.type === '精剪'
                                 ? `/projects/${t.project_id}/edit`
-                                : `/projects/${t.project_id}/lyrics`,
+                                : t.type === '配图'
+                                  ? `/projects/${t.project_id}/storyboard`
+                                  : `/projects/${t.project_id}/lyrics`,
                             )
                           }
                         >
@@ -206,8 +224,8 @@ export default function Dashboard() {
             </Section>
 
             <Section
-              title="GPU 任务队列"
-              right={<span className="h-sub">每 6 秒刷新</span>}
+              title="任务队列"
+              right={<span className="h-sub">进行中与失败优先 · 隐藏 24 小时前已完成</span>}
               bodyClass="p-3"
             >
               <div className="mb-2 flex items-center gap-2 text-[11px] text-ink-soft">
@@ -216,11 +234,11 @@ export default function Dashboard() {
                 {' / gpu '}
                 {data.device.concurrency.gpu}
               </div>
-              {data.gpu_queue.length === 0 ? (
-                <Empty text="暂无任务" />
+              {queue.length === 0 ? (
+                <Empty text="暂无进行中的任务" />
               ) : (
                 <div className="flex flex-col gap-2 max-h-[300px] overflow-y-auto">
-                  {data.gpu_queue.slice(0, 12).map((j: any) => (
+                  {queue.slice(0, 12).map((j: any) => (
                     <div key={j.id} className="border border-line rounded-btn p-2.5">
                       <div className="flex items-center gap-1.5">
                         <StateDot status={j.status} />
@@ -261,7 +279,7 @@ export default function Dashboard() {
             </Section>
 
             <Section
-              title="模型战绩"
+              title="选型战绩"
               right={
                 <button className="text-[11px] text-brand underline" onClick={() => setShowModels(true)}>
                   详情
@@ -275,11 +293,11 @@ export default function Dashboard() {
                     <th className="text-left font-normal pb-1">模型</th>
                     <th className="text-right font-normal pb-1">胜出</th>
                     <th className="text-right font-normal pb-1">轮次</th>
-                    <th className="text-right font-normal pb-1">均分</th>
+                    <th className="text-right font-normal pb-1" title="1–5 分">均分</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {data.models.map((m: any) => (
+                  {selModels.map((m: any) => (
                     <tr key={m.key} className="border-t border-line">
                       <td className="py-1.5 truncate max-w-[130px]">
                         <span className="flex items-center gap-1.5">
@@ -289,11 +307,15 @@ export default function Dashboard() {
                       </td>
                       <td className="text-right font-medium text-brand">{m.wins}</td>
                       <td className="text-right text-ink-soft">{m.rounds}</td>
-                      <td className="text-right">{m.avg_score || '—'}</td>
+                      <td className="text-right">{m.score_n ? m.avg_score.toFixed(2) : '—'}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+              <div className="mt-2 text-[10px] text-ink-faint">
+                只统计已揭晓的选型轮（盲听）；生产模式不计入。
+                {selModels.every((m: any) => m.rounds < 3) && ' 目前样本不足 3 轮，结论仅供参考。'}
+              </div>
             </Section>
           </div>
         </div>
@@ -326,10 +348,10 @@ export default function Dashboard() {
                 <span className="text-[13px] font-medium">{m.name}</span>
                 <span className="tag">{m.run_mode === 'local' ? '本地' : 'API'}</span>
                 <span className={m.ready ? 'tag-brand' : 'tag-human'}>
-                  {m.ready ? '凭证就绪' : `降级到 ${m.effective}`}
+                  {m.ready ? '凭证就绪' : m.usable ? '未配置（允许占位）' : '未配置（不可用）'}
                 </span>
                 <span className="ml-auto text-[11px] text-ink-soft">
-                  胜出 {m.wins} · 轮次 {m.rounds} · 均分 {m.avg_score || '—'}
+                  {m.in_selection ? `选型轮 胜出 ${m.wins} · 轮次 ${m.rounds} · 均分 ${m.score_n ? m.avg_score.toFixed(2) : '—'}` : '不参加选型轮'}
                 </span>
               </div>
               <div className="mt-1.5 text-[11px] text-ink-soft">

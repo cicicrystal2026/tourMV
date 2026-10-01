@@ -34,6 +34,15 @@ export default function LyricsPage() {
   // 默认只给「看歌词、审核、选曲」这条主线；逐句勾选/重写/韵脚字数这些是精细操作，
   // 需要时才展开，避免一进页面就被十几个控件淹没。
   const [advanced, setAdvanced] = useState(false)
+  // PRD V1.1 D2：生产模式（日常出片）/ 选型轮（盲听对比，确定主力模型）
+  const [mode, setMode] = useState<'production' | 'selection'>('production')
+  const [roundId, setRoundId] = useState<string>('')
+  const [rounds, setRounds] = useState<any[]>([])
+  const [roundMeta, setRoundMeta] = useState<any>(null)
+  // 「保留原文」要填理由：记下正在处理的检查项
+  const [keepFor, setKeepFor] = useState<any>(null)
+  const [keepReason, setKeepReason] = useState('')
+  const [projectsLoading, setProjectsLoading] = useState(true)
 
   const loadAll = useCallback(
     async (id: string) => {
@@ -45,7 +54,7 @@ export default function LyricsPage() {
           api.project(id),
           api.lyrics(id),
           api.musicModels(),
-          api.candidates(id),
+          api.candidates(id, roundId || undefined),
         ])
         setDetail(d)
         setLyric(l.current)
@@ -55,13 +64,15 @@ export default function LyricsPage() {
         if (!dirty) setSections(l.current?.sections || [])
         setModels(m)
         setCands(c.items || [])
+        setRounds(c.rounds || [])
+        setRoundMeta(c.round_meta || null)
         setErr('')
         setPicked((prev) => {
           if (Object.keys(prev).length) return prev
-          // 默认只勾选第一个已就绪的模型：一轮只出一首，试听满意再选下一个，
-          // 避免一次并排生成多首（省 token）。想对比时用户可手动多勾。
+          // 默认只勾选第一个可用模型：一轮只出一首，试听满意再选下一个，省钱。
           const first =
-            m.find((x: any) => x.enabled && x.ready) || m.find((x: any) => x.enabled)
+            m.find((x: any) => x.enabled && x.ready && x.in_production) ||
+            m.find((x: any) => x.enabled && x.usable && x.in_production)
           const init: Record<string, boolean> = {}
           m.forEach((x: any) => (init[x.key] = !!first && x.key === first.key))
           return init
@@ -70,29 +81,51 @@ export default function LyricsPage() {
         setErr(e?.message || String(e))
       }
     },
-    [dirty],
+    [dirty, roundId],
   )
 
   useEffect(() => {
     if (projectId) loadAll(projectId)
-    else api.projects().then(setProjects)
+    else
+      api
+        .projects()
+        .then(setProjects)
+        .catch((e: any) => setErr(e?.message || String(e)))
+        .finally(() => setProjectsLoading(false))
   }, [projectId, loadAll])
 
-  // 生成中轮询
+  // 机器在跑时轮询：写词 / 检查未完成 / 有候选还在生成。
+  // 用 setTimeout 链而不是 setInterval —— 上一轮没回来就不发下一轮，慢网络下不会堆积请求。
   const status = detail?.project?.status
+  const busyGen =
+    ['lyric_generating', 'music_generating'].includes(status) ||
+    summary?.state === 'checking' ||
+    cands.some((c) => ['queued', 'running'].includes(c.status))
   useEffect(() => {
-    if (!projectId) return
-    if (!['lyric_generating', 'music_generating'].includes(status)) return
-    const t = setInterval(() => loadAll(projectId), 4000)
-    return () => clearInterval(t)
-  }, [projectId, status, loadAll])
+    if (!projectId || !busyGen) return
+    let alive = true
+    let t: number | undefined
+    const tick = async () => {
+      await loadAll(projectId)
+      if (alive) t = window.setTimeout(tick, 4000)
+    }
+    t = window.setTimeout(tick, 4000)
+    return () => {
+      alive = false
+      if (t) clearTimeout(t)
+    }
+  }, [projectId, busyGen, loadAll])
 
   if (!projectId) {
     return (
       <>
         <PageHeader title="词曲工作台" subtitle="选择一个项目进入" />
         <div className="p-6">
-          {projects.length === 0 ? (
+          {projectsLoading ? (
+            <Spinner />
+          ) : err ? (
+            <Banner tone="error">{err}</Banner>
+          ) : projects.length === 0 ? (
             <Empty text="还没有项目，先到生产看板新建" />
           ) : (
             <div className="grid grid-cols-3 gap-4">
@@ -145,6 +178,14 @@ export default function LyricsPage() {
     (s.lines || []).map((ln: string, li: number) => ({ si, li, key: `${si}:${li}`, section: s.name, text: ln })),
   )
   const pendingChecks = checks.filter((c) => c.status === 'pending')
+  const locked = !!p.locked
+  const gate = detail.gate || { ok: true, reasons: [] }
+  const canEditLyrics = p.status === 'lyric_review' && !locked
+  const allowMock = !!detail.allow_mock
+  const pickedKeys = Object.entries(picked)
+    .filter(([k, v]) => v && models.find((m) => m.key === k && (mode === 'selection' ? m.in_selection : m.in_production) && m.usable))
+    .map(([k]) => k)
+  const genPayload = () => ({ models: pickedKeys, variants, mode })
 
   const act = async (key: string, fn: () => Promise<any>, after?: () => void) => {
     setBusy(key)
@@ -181,44 +222,62 @@ export default function LyricsPage() {
         }
         actions={
           <>
-            {p.reject_targets?.length > 0 && (
+            {locked && (
+              <button
+                className="btn-primary"
+                disabled={!!busy}
+                title="已交付项目只读；修订版会复制简报与歌词，重新走一遍闸门"
+                onClick={() =>
+                  act('revise', async () => {
+                    const np = await api.revise(p.id)
+                    nav(`/projects/${np.id}/lyrics`)
+                  })
+                }
+              >
+                新建修订版
+              </button>
+            )}
+            {!locked && p.reject_targets?.length > 0 && (
               <button className="btn" onClick={() => setRejectOpen(true)} disabled={!!busy}>
                 驳回到上游
               </button>
             )}
-            {p.status === 'briefing' && (
+            {/* 全页只有一个主按钮，对应当前人工节点（PRD V1.1 §6.2）；是否可点由后端闸门决定 */}
+            {p.status === 'briefing' && !locked && (
               <button
                 className="btn-primary"
-                disabled={!!busy}
+                disabled={!!busy || !gate.ok}
+                title={gate.reasons.join('；')}
                 onClick={() => act('advance', () => api.advance(p.id), () => loadAll(p.id))}
               >
                 确认简报，开始写词
               </button>
             )}
-            {p.status === 'lyric_review' && (
+            {p.status === 'lyric_review' && !locked && (
               <button
                 className="btn-human"
-                disabled={!!busy}
+                disabled={!!busy || !gate.ok || pickedKeys.length === 0 || dirty}
+                title={
+                  dirty
+                    ? '歌词有未保存的修改，先保存版本'
+                    : !gate.ok
+                      ? gate.reasons.join('；')
+                      : pickedKeys.length === 0
+                        ? '在右侧「模型配置」里勾选生成用的模型'
+                        : ''
+                }
                 onClick={() =>
-                  act(
-                    'advance',
-                    () =>
-                      api.advance(p.id, {
-                        models: Object.entries(picked).filter(([, v]) => v).map(([k]) => k),
-                        variants,
-                      }),
-                    () => loadAll(p.id),
-                  )
+                  act('advance', () => api.advance(p.id, genPayload()), () => loadAll(p.id))
                 }
               >
-                确认歌词，进入生曲
+                {mode === 'selection' ? '确认歌词，发起选型轮' : '确认歌词，开始生曲'}
               </button>
             )}
-            {p.status === 'music_review' && (
+            {p.status === 'music_review' && !locked && (
               <button
                 className="btn-human"
-                disabled={!!busy || !p.selected_candidate_id}
-                title={p.selected_candidate_id ? '' : '请先选定一版候选'}
+                disabled={!!busy || !gate.ok}
+                title={gate.reasons.join('；')}
                 onClick={() =>
                   act('advance', () => api.advance(p.id), () => nav(`/projects/${p.id}/storyboard`))
                 }
@@ -237,6 +296,19 @@ export default function LyricsPage() {
       <div className="p-6 flex flex-col gap-4">
         {/* 上手引导：一句话说清「现在该做什么」，高级操作收在折叠里 */}
         <GuideCard status={p.status} />
+
+        {locked && (
+          <Banner tone="warn">
+            该项目已交付并锁定，只读。需要调整请点右上角「新建修订版」——修订版会复制简报与歌词，并重新走一遍检查与闸门。
+          </Banner>
+        )}
+        {/* 闸门原因逐条摆出来：V1.0 只把按钮置灰，用户不知道差什么 */}
+        {!locked && isHuman && !gate.ok && gate.reasons.length > 0 && (
+          <Banner tone="warn">
+            <span className="font-medium">还不能进入下一步：</span>
+            {gate.reasons.join('；')}
+          </Banner>
+        )}
 
         {err && (
           <Banner tone="error" onClose={() => setErr('')}>
@@ -266,13 +338,18 @@ export default function LyricsPage() {
             action={
               <button className="text-[11px] text-brand underline ml-1" onClick={() => {
                 setShowTrends(true)
-                api.trendCards().then((r) => setTrendCards(r.items || []))
+                // 只显示本项目引用的素材卡（V1.0 显示的是全部卡片）
+                api.trendCards().then((r) => {
+                  const ids: string[] = b.trend_card_ids || []
+                  const items = r.items || []
+                  setTrendCards(ids.length ? items.filter((c: any) => ids.includes(c.id)) : items)
+                })
               }}>
                 查看
               </button>
             }
           />
-          <BriefField label="知识库引用" value="本期不接入（按需求直调 LLM）" />
+          <BriefField label="知识库引用" value="未接入（W3 上线；之前史实疑点一律需人工核实）" />
         </div>
 
         <div className="grid grid-cols-[1fr_380px] gap-5 items-start">
@@ -294,7 +371,7 @@ export default function LyricsPage() {
                     />
                     逐句校订
                   </label>
-                  {advanced && (
+                  {advanced && canEditLyrics && (
                   <button
                     className="btn btn-sm"
                     disabled={!pickedLineCount(selectedLines) || !!busy}
@@ -321,9 +398,11 @@ export default function LyricsPage() {
                     重写选中行
                   </button>
                   )}
+                  {canEditLyrics && (
                   <button
                     className="btn btn-sm"
-                    disabled={!!busy || !['briefing', 'lyric_generating', 'lyric_review'].includes(p.status)}
+                    disabled={!!busy}
+                    title="整首重写（会生成新版本并重新检查）"
                     onClick={() =>
                       act('gen', () => api.generateLyrics(p.id, true), () => {
                         setDirty(false)
@@ -333,9 +412,10 @@ export default function LyricsPage() {
                   >
                     重新生成
                   </button>
+                  )}
                   <button
                     className="btn-primary btn-sm"
-                    disabled={!dirty || !!busy}
+                    disabled={!dirty || !!busy || !canEditLyrics}
                     onClick={() =>
                       act('save', () => api.saveLyrics(p.id, lyric?.version || 1, sections), () => {
                         setDirty(false)
@@ -351,16 +431,14 @@ export default function LyricsPage() {
               bodyClass="p-4"
             >
               {sections.length === 0 ? (
+                // 首次写词只能通过「确认简报」触发：简报没确认就写词，等于跳过了第一道闸门
                 <Empty
-                  text="还没有歌词"
-                  action={
-                    <button
-                      className="btn-primary"
-                      disabled={!!busy}
-                      onClick={() => act('gen', () => api.generateLyrics(p.id, true), () => loadAll(p.id))}
-                    >
-                      生成歌词
-                    </button>
+                  text={
+                    p.status === 'lyric_generating'
+                      ? 'AI 正在写词，完成后自动出现在这里…'
+                      : p.status === 'briefing'
+                        ? '还没有歌词：核对简报后点右上角「确认简报，开始写词」'
+                        : '还没有歌词'
                   }
                 />
               ) : (
@@ -401,8 +479,10 @@ export default function LyricsPage() {
                               )}
                               <span className="text-[10px] text-ink-faint w-5 text-right shrink-0">{li + 1}</span>
                               <input
-                                className="flex-1 bg-transparent border-b border-transparent hover:border-line focus:border-brand outline-none py-1 text-[13px]"
+                                className="flex-1 bg-transparent border-b border-transparent hover:border-line focus:border-brand outline-none py-1 text-[13px] read-only:hover:border-transparent"
                                 value={ln}
+                                readOnly={!canEditLyrics}
+                                title={canEditLyrics ? '' : '只有「待确认歌词」阶段可以改词；需要改请驳回到这一步'}
                                 onChange={(e) => {
                                   const next = sections.map((x: any, i: number) =>
                                     i === si ? { ...x, lines: x.lines.map((y: string, j: number) => (j === li ? e.target.value : y)) } : x,
@@ -435,25 +515,36 @@ export default function LyricsPage() {
               title="自动检查"
               right={
                 <div className="flex items-center gap-2">
-                  {summary.by_type &&
+                  {/* 标签只取后端检查结果；检查没跑完时绝不显示「通过」（V1.0 无歌词也显示三项通过） */}
+                  {summary.state === 'done' &&
+                    summary.by_type &&
                     Object.entries(summary.by_type).map(([k, v]: any) => (
                       <span key={k} className={v.pending ? 'tag-human' : 'tag'}>
                         {CHECK_TYPE_LABEL[k]} {v.pending ? `${v.pending} 条待确认` : '通过'}
                       </span>
                     ))}
-                  <button
-                    className="btn btn-sm"
-                    disabled={!!busy || !lyric}
-                    onClick={() => act('check', () => api.recheck(p.id), () => loadAll(p.id))}
-                  >
-                    重新检查
-                  </button>
+                  {summary.state === 'checking' && <span className="tag-brand">检查中…</span>}
+                  {canEditLyrics && (
+                    <button
+                      className="btn btn-sm"
+                      disabled={!!busy || !lyric || summary.state === 'checking'}
+                      onClick={() => act('check', () => api.recheck(p.id), () => loadAll(p.id))}
+                    >
+                      重新检查
+                    </button>
+                  )}
                 </div>
               }
               bodyClass="p-4"
             >
-              {checks.length === 0 ? (
-                <Empty text="三项检查全部通过" />
+              {summary.state === 'none' ? (
+                <Empty text="还没有歌词，写完后自动检查押韵、字数与史实" />
+              ) : summary.state === 'checking' ? (
+                <div className="flex items-center gap-2 text-[12px] text-ink-soft">
+                  <Spinner /> 正在检查押韵、字数与史实，完成前不能确认歌词…
+                </div>
+              ) : checks.length === 0 ? (
+                <Empty text="三项检查均未发现疑点" />
               ) : (
                 <div className="flex flex-col gap-2.5">
                   {checks.map((c) => (
@@ -466,22 +557,30 @@ export default function LyricsPage() {
                     >
                       <div className="flex items-center gap-2">
                         <span className={c.status === 'pending' ? 'tag-human' : 'tag'}>{CHECK_TYPE_LABEL[c.type]}</span>
+                        {c.needs_manual && (
+                          <span className="tag-human" title="知识库尚未接入，这条疑点没有可追溯出处，需人工查证后再决定">
+                            需人工核实
+                          </span>
+                        )}
                         <span className="text-[11px] text-ink-soft">
                           {c.section} 第 {c.line_no} 行
                         </span>
                         <span className="text-[11px] text-ink-faint truncate flex-1">{c.text}</span>
-                        {c.status !== 'pending' && (
-                          <span className="tag-brand">已处理</span>
-                        )}
+                        {c.status === 'kept' && <span className="tag-brand">已保留原文</span>}
+                        {c.status === 'adopted' && <span className="tag-brand">已采纳</span>}
                       </div>
                       {c.evidence && <div className="mt-1.5 text-[11px] text-ink-soft">依据：{c.evidence}</div>}
-                      {c.suggestions?.length > 0 && (
+                      {c.status === 'kept' && c.keep_reason && (
+                        <div className="mt-1 text-[11px] text-ink-faint">保留理由：{c.keep_reason}</div>
+                      )}
+                      {c.status === 'pending' && canEditLyrics && (
                         <div className="mt-2 flex flex-wrap items-center gap-2">
-                          {c.suggestions.map((s: string, i: number) => (
+                          {(c.suggestions || []).map((s: string, i: number) => (
                             <button
                               key={i}
                               className="btn btn-sm"
-                              disabled={!!busy}
+                              disabled={!!busy || dirty}
+                              title={dirty ? '先保存手动修改' : '用这句替换原行，生成新版本并重新检查'}
                               onClick={() =>
                                 act('adopt', () => api.adoptCheck(c.id, i), () => {
                                   setDirty(false)
@@ -493,13 +592,20 @@ export default function LyricsPage() {
                               采纳：{s}
                             </button>
                           ))}
+                          {/* 「保留原文」任何疑点都要能点（V1.0 没有建议的疑点连这个按钮都没有，只能卡住） */}
                           <button
                             className="btn btn-sm"
                             disabled={!!busy}
-                            onClick={() => act('resolve', () => api.resolveCheck(c.id), () => loadAll(p.id))}
+                            onClick={() => {
+                              setKeepFor(c)
+                              setKeepReason(c.needs_manual ? '已人工查证属实' : '')
+                            }}
                           >
-                            保留原文
+                            保留原文…
                           </button>
+                          {(c.suggestions || []).length === 0 && (
+                            <span className="text-[10px] text-ink-faint">没有合格的改写建议，可直接在上方编辑该行后保存</span>
+                          )}
                         </div>
                       )}
                     </div>
@@ -524,7 +630,7 @@ export default function LyricsPage() {
                       <span className="text-ink-faint">
                         {flatLineCount(v.sections || [])} 行 · {relative(v.created_at)}
                       </span>
-                      {v.id !== lyric?.id && (
+                      {v.id !== lyric?.id && canEditLyrics && (
                         <button
                           className="ml-auto text-brand underline shrink-0"
                           disabled={!!busy}
@@ -548,45 +654,101 @@ export default function LyricsPage() {
 
           {/* 右栏 */}
           <div className="flex flex-col gap-4">
-            <Section title="模型配置" bodyClass="p-3">
+            <Section
+              title="模型配置"
+              right={
+                // PRD V1.1 D2：生产模式（日常出片）/ 选型轮（盲听，确定主力模型）
+                <div className="flex rounded-btn border border-line overflow-hidden text-[11px]">
+                  {(
+                    [
+                      ['production', '生产模式'],
+                      ['selection', '选型轮'],
+                    ] as const
+                  ).map(([k, label]) => (
+                    <button
+                      key={k}
+                      className={clsx('px-2.5 py-1', mode === k ? 'bg-brand text-white' : 'bg-white text-ink-soft')}
+                      onClick={() => {
+                        setMode(k)
+                        setVariants(k === 'selection' ? 2 : 1)
+                        // 选型轮默认全选可用的参赛模型；生产模式默认只勾一个
+                        const pool = models.filter((m) => (k === 'selection' ? m.in_selection : m.in_production) && m.usable)
+                        const next: Record<string, boolean> = {}
+                        models.forEach((m) => (next[m.key] = false))
+                        ;(k === 'selection' ? pool : pool.slice(0, 1)).forEach((m) => (next[m.key] = true))
+                        setPicked(next)
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              }
+              bodyClass="p-3"
+            >
+              <div className="text-[11px] text-ink-faint mb-2 leading-relaxed">
+                {mode === 'selection'
+                  ? '选型轮：参赛模型并行各出几版，盲听打分后选定，选定才揭晓模型并计入战绩。用于确定主力模型。'
+                  : '生产模式：用一个模型出一首，不满意再换模型或同模型再来。显示模型名，不计入战绩。'}
+              </div>
               <table className="w-full text-[11px]">
                 <thead>
                   <tr className="text-ink-faint">
                     <th className="text-left font-normal pb-1 w-6"></th>
                     <th className="text-left font-normal pb-1">模型</th>
-                    <th className="text-right font-normal pb-1">本轮均分</th>
-                    <th className="text-right font-normal pb-1">累计胜出</th>
+                    <th className="text-right font-normal pb-1" title="只统计已揭晓的选型轮，1–5 分">
+                      选型均分
+                    </th>
+                    <th className="text-right font-normal pb-1">胜出 / 轮</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {models.map((m) => (
-                    <tr key={m.key} className="border-t border-line">
-                      <td className="py-2">
-                        <input
-                          type="checkbox"
-                          className="accent-[#0F5E57]"
-                          checked={!!picked[m.key]}
-                          onChange={(e) => setPicked({ ...picked, [m.key]: e.target.checked })}
-                        />
-                      </td>
-                      <td className="py-2">
-                        <div className="flex items-center gap-1.5">
-                          <StateDot status={m.ready ? 'done' : 'queued'} />
-                          <span className="truncate">{m.name}</span>
-                        </div>
-                        <div className="text-[10px] text-ink-faint">
-                          {m.run_mode === 'local' ? '本地 4090' : 'API'}
-                          {m.model ? ` · ${m.model}` : ''} · {m.ready ? '已就绪' : `降级 ${m.effective}`}
-                        </div>
-                      </td>
-                      <td className="text-right">{m.avg_score || '—'}</td>
-                      <td className="text-right font-medium text-brand">{m.wins}</td>
-                    </tr>
-                  ))}
+                  {models
+                    .filter((m) => (mode === 'selection' ? m.in_selection : m.in_production))
+                    .map((m) => (
+                      <tr key={m.key} className={clsx('border-t border-line', !m.usable && 'opacity-50')}>
+                        <td className="py-2">
+                          <input
+                            type="checkbox"
+                            className="accent-[#0F5E57]"
+                            checked={!!picked[m.key]}
+                            disabled={!m.usable}
+                            title={m.usable ? '' : '未配置凭证，生产环境禁用占位结果'}
+                            onChange={(e) =>
+                              setPicked(
+                                mode === 'production' && e.target.checked
+                                  ? // 生产模式一次只出一首：单选
+                                    Object.fromEntries(models.map((x) => [x.key, x.key === m.key]))
+                                  : { ...picked, [m.key]: e.target.checked },
+                              )
+                            }
+                          />
+                        </td>
+                        <td className="py-2">
+                          <div className="flex items-center gap-1.5">
+                            <StateDot status={m.ready ? 'done' : 'queued'} />
+                            <span className="truncate">{m.name}</span>
+                          </div>
+                          <div className="text-[10px] text-ink-faint">
+                            {m.run_mode === 'local' ? '本地 4090' : 'API'}
+                            {m.model ? ` · ${m.model}` : ''} ·{' '}
+                            {m.ready ? '已就绪' : m.usable ? '未配置（占位）' : '未配置'}
+                          </div>
+                        </td>
+                        <td className="text-right">{m.score_n ? m.avg_score.toFixed(2) : '—'}</td>
+                        <td className="text-right">
+                          <span className="font-medium text-brand">{m.wins}</span>
+                          <span className="text-ink-faint"> / {m.rounds}</span>
+                        </td>
+                      </tr>
+                    ))}
                 </tbody>
               </table>
+              {models.some((m) => m.in_selection && m.rounds > 0 && m.rounds < 3) && (
+                <div className="mt-1 text-[10px] text-ink-faint">选型轮样本不足 3 轮，战绩仅供参考</div>
+              )}
               <div className="mt-3 border-t border-line pt-3 flex flex-col gap-2">
-                <Field label="生成版数">
+                <Field label={mode === 'selection' ? '每个模型出几版' : '生成版数'}>
                   <div className="flex items-center gap-2">
                     <input
                       type="number"
@@ -596,69 +758,99 @@ export default function LyricsPage() {
                       value={variants}
                       onChange={(e) => setVariants(Math.max(1, Math.min(4, Number(e.target.value))))}
                     />
-                    <span className="text-[11px] text-ink-faint">
-                      共 {Object.values(picked).filter(Boolean).length * variants} 个候选
-                      （默认 1 首，试听后不满意再换模型）
-                    </span>
+                    <span className="text-[11px] text-ink-faint">共 {pickedKeys.length * variants} 个候选</span>
                   </div>
                 </Field>
-                <button
-                  className="btn-primary w-full"
-                  disabled={
-                    !!busy ||
-                    !lyric ||
-                    !['lyric_review', 'music_generating', 'music_review'].includes(p.status) ||
-                    Object.values(picked).filter(Boolean).length === 0
-                  }
-                  title={
-                    !lyric
-                      ? '先生成并确认歌词'
-                      : p.status === 'lyric_review'
-                        ? '先生成？点此会先确认歌词再生成'
-                        : ''
-                  }
-                  onClick={() =>
-                    act(
-                      'music',
-                      () => {
-                        const payload = {
-                          models: Object.entries(picked).filter(([, v]) => v).map(([k]) => k),
-                          variants,
-                        }
-                        // 还在"待确认歌词"时，一次点击完成"确认 + 按所选模型生成"，避免重复触发
-                        if (p.status === 'lyric_review') return api.advance(p.id, payload)
-                        return api.generateMusic(p.id, { ...payload, style_prompt: b.style_prompt })
-                      },
-                      () => {
-                        setMsg(`已按所选模型派发生成任务（每模型 ${variants} 版）`)
-                        loadAll(p.id)
-                      },
-                    )
-                  }
-                >
-                  {p.status === 'lyric_review' ? '确认歌词并生成一首' : '用所选模型生成一首'}
-                </button>
+                {p.status === 'lyric_review' ? (
+                  // 待确认歌词时不在这里放第二个主按钮：生成由右上角「确认歌词」触发（全页只有一个主按钮）
+                  <div className="text-[11px] text-ink-faint">
+                    选好模型后，点右上角「{mode === 'selection' ? '确认歌词，发起选型轮' : '确认歌词，开始生曲'}」。
+                  </div>
+                ) : (
+                  <button
+                    className="btn w-full"
+                    disabled={
+                      !!busy ||
+                      locked ||
+                      !['music_generating', 'music_review'].includes(p.status) ||
+                      pickedKeys.length === 0 ||
+                      (mode === 'selection' && pickedKeys.length < 2)
+                    }
+                    title={
+                      !['music_generating', 'music_review'].includes(p.status)
+                        ? '确认歌词后才能生曲'
+                        : mode === 'selection' && pickedKeys.length < 2
+                          ? '选型轮至少勾选 2 个模型'
+                          : ''
+                    }
+                    onClick={() =>
+                      act(
+                        'music',
+                        async () => {
+                          const r = await api.generateMusic(p.id, { ...genPayload(), style_prompt: b.style_prompt })
+                          setRoundId(r.round_id || '')
+                        },
+                        () => {
+                          setMsg(mode === 'selection' ? '已发起选型轮（盲听）' : `已派发生成任务（${variants} 首）`)
+                          loadAll(p.id)
+                        },
+                      )
+                    }
+                  >
+                    {mode === 'selection' ? '发起新一轮选型（盲听）' : '用所选模型再生成'}
+                  </button>
+                )}
               </div>
             </Section>
 
             <Section
               title={`候选曲目 ${cands.length ? `(${cands.length})` : ''}`}
-              right={<span className="h-sub">模型与版本直接可见</span>}
+              right={
+                roundMeta ? (
+                  <span className={roundMeta.blind ? 'tag-human' : 'tag'}>
+                    {roundMeta.kind === 'selection'
+                      ? `选型轮 #${roundMeta.selection_no}${roundMeta.blind ? ' · 盲听中' : ' · 已揭晓'}`
+                      : '生产模式'}
+                  </span>
+                ) : null
+              }
               bodyClass="p-3"
             >
+              {rounds.length > 1 && (
+                <div className="flex flex-wrap gap-1.5 mb-2.5">
+                  {rounds.map((r) => (
+                    <button
+                      key={r.id}
+                      className={clsx(
+                        'text-[10px] px-2 py-0.5 rounded border',
+                        roundMeta?.id === r.id ? 'border-brand text-brand bg-brand-soft/40' : 'border-line text-ink-soft',
+                      )}
+                      onClick={() => setRoundId(r.id)}
+                    >
+                      第 {r.round_no} 轮 · {r.kind === 'selection' ? `选型${r.blind ? '（盲听）' : ''}` : '生产'}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {roundMeta?.blind && (
+                <div className="mb-2.5 text-[11px] text-ink-soft bg-page border border-line rounded-btn px-2.5 py-2">
+                  盲听中：本轮 {roundMeta.model_count} 个模型的候选已随机编号。逐个试听并给<b>所有候选</b>打分，再选定最好的一版——选定后揭晓模型并计入战绩。
+                </div>
+              )}
               {cands.length === 0 ? (
-                <Empty text="还没有候选曲目" />
+                <Empty text={p.status === 'music_generating' ? '正在生成，完成后出现在这里…' : '还没有候选曲目'} />
               ) : (
                 <div className="flex flex-col gap-2.5 max-h-[620px] overflow-y-auto pr-0.5">
                   {cands.map((c) => (
                     <CandidateCard
                       key={c.id}
-                      c={c}
+                      c={{ ...c, allow_mock: allowMock }}
                       selected={p.selected_candidate_id === c.id}
                       playing={playing === c.id}
                       onPlay={() => setPlaying(c.id)}
                       onPause={() => setPlaying((v) => (v === c.id ? '' : v))}
                       busy={busy === c.id}
+                      readOnly={locked || !['music_generating', 'music_review'].includes(p.status)}
                       onRate={(patch) =>
                         act(c.id, () =>
                           api.rate(c.id, {
@@ -669,10 +861,14 @@ export default function LyricsPage() {
                         ).then(() => loadAll(p.id))
                       }
                       onSelect={() =>
-                        act(c.id, () => api.selectCandidate(p.id, c.id), () => {
-                          setMsg(`已选定 ${c.model_name} 第 ${c.variant} 版`)
-                          loadAll(p.id)
-                        })
+                        act(c.id, async () => {
+                          const r = await api.selectCandidate(p.id, c.id)
+                          setMsg(
+                            r.revealed
+                              ? `已选定候选 ${c.label}，揭晓：${r.model_name}（已计入选型战绩）`
+                              : `已选定 ${r.model_name} 第 ${r.variant} 版`,
+                          )
+                        }, () => loadAll(p.id))
                       }
                     />
                   ))}
@@ -684,69 +880,67 @@ export default function LyricsPage() {
               <Section title="已选结果" bodyClass="p-3">
                 {(() => {
                   const sel = cands.find((c) => c.id === p.selected_candidate_id)
-                  if (!sel) return <Empty text="—" />
+                  if (!sel) return <Empty text="选定的曲目在其他轮次，可在上方切换轮次查看" />
                   return (
                     <div className="flex flex-col gap-1.5 text-[12px]">
                       <div className="flex items-center gap-2">
                         <StateDot status="done" />
-                        <span className="font-medium">{sel.model_name}</span>
-                        <span className="tag">第 {sel.variant} 版</span>
+                        <span className="font-medium">{sel.model_name || `候选 ${sel.label}`}</span>
+                        {sel.variant && <span className="tag">第 {sel.variant} 版</span>}
+                        {sel.is_mock && <span className="tag-human">占位</span>}
                       </div>
                       <div className="text-ink-soft">
-                        BPM {Math.round(sel.bpm || 0)} · {fmtDuration(sel.duration_s)} · 匹配分 {sel.fit_score}
+                        BPM {Math.round(sel.bpm || 0)} · {fmtDuration(sel.duration_s)}
+                        {sel.fit_score !== null && sel.fit_score !== undefined && ` · 匹配分 ${sel.fit_score}`}
                       </div>
                       {sel.rating && (
                         <div className="text-ink-soft">
                           人工评分 咬字 {sel.rating.diction} / 旋律 {sel.rating.melody} / 编曲 {sel.rating.arrangement}
-                          （合计 {sel.rating.total}）
+                          （均分 {(sel.rating.total / 3).toFixed(1)}）
                         </div>
                       )}
-                      <div className="mt-2 border-t border-line pt-2 flex flex-col gap-1.5">
-                        <div className="text-[11px] text-ink-faint">
-                          试听不满意？换一个模型再生成一首（每次只出一首）
+                      {!locked && p.status === 'music_review' && sel.round_kind !== 'selection' && (
+                        <div className="mt-2 border-t border-line pt-2 flex flex-col gap-1.5">
+                          <div className="text-[11px] text-ink-faint">
+                            试听不满意？换一个模型再生成一首（每次只出一首）
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {models
+                              .filter((m) => m.enabled && m.in_production && m.usable && m.key !== sel.model_key)
+                              .map((m) => (
+                                <button
+                                  key={m.key}
+                                  className="btn btn-sm"
+                                  disabled={!!busy}
+                                  onClick={() =>
+                                    act(
+                                      'regen',
+                                      () => api.generateMusic(p.id, { models: [m.key], variants: 1, mode: 'production' }),
+                                      () => {
+                                        setMsg(`已用 ${m.name} 生成 1 首`)
+                                        loadAll(p.id)
+                                      },
+                                    )
+                                  }
+                                >
+                                  换 {m.name} 生成 1 首
+                                </button>
+                              ))}
+                            <button
+                              className="btn btn-sm"
+                              disabled={!!busy}
+                              onClick={() =>
+                                act('regen', () => api.regenerate(p.id, 1), () => {
+                                  setMsg(`已用 ${sel.model_name} 再生成 1 版`)
+                                  loadAll(p.id)
+                                })
+                              }
+                            >
+                              同模型再来 1 版
+                            </button>
+                          </div>
                         </div>
-                        <div className="flex flex-wrap gap-2">
-                          {models
-                            .filter(
-                              (m) => m.enabled && m.ready && m.key !== sel.model_key,
-                            )
-                            .map((m) => (
-                              <button
-                                key={m.key}
-                                className="btn btn-sm"
-                                disabled={!!busy}
-                                onClick={() =>
-                                  act(
-                                    'regen',
-                                    () =>
-                                      api.generateMusic(p.id, {
-                                        models: [m.key],
-                                        variants: 1,
-                                      }),
-                                    () => {
-                                      setMsg(`已用 ${m.name} 生成 1 首`)
-                                      loadAll(p.id)
-                                    },
-                                  )
-                                }
-                              >
-                                换 {m.name} 生成 1 首
-                              </button>
-                            ))}
-                          <button
-                            className="btn btn-sm"
-                            disabled={!!busy}
-                            onClick={() =>
-                              act('regen', () => api.regenerate(p.id, 1), () => {
-                                setMsg(`已用 ${sel.model_name} 再生成 1 版`)
-                                loadAll(p.id)
-                              })
-                            }
-                          >
-                            同模型再来 1 版
-                          </button>
-                        </div>
-                      </div>
+                      )}
                     </div>
                   )
                 })()}
@@ -788,6 +982,51 @@ export default function LyricsPage() {
             </div>
           ))}
         </div>
+      </Modal>
+
+      <Modal
+        open={!!keepFor}
+        title="保留原文"
+        onClose={() => setKeepFor(null)}
+        footer={
+          <>
+            <button className="btn" onClick={() => setKeepFor(null)}>
+              取消
+            </button>
+            <button
+              className="btn-primary"
+              disabled={!!busy || keepReason.trim().length < 2}
+              onClick={() =>
+                act('keep', () => api.keepCheck(keepFor.id, keepReason.trim()), () => {
+                  setKeepFor(null)
+                  setMsg('已保留原文（理由已留档）')
+                  loadAll(p.id)
+                })
+              }
+            >
+              确认保留
+            </button>
+          </>
+        }
+      >
+        {keepFor && (
+          <div className="flex flex-col gap-2">
+            <div className="text-[12px]">
+              <span className="text-ink-faint">{keepFor.section} 第 {keepFor.line_no} 行：</span>
+              {keepFor.text}
+            </div>
+            {keepFor.evidence && <div className="text-[11px] text-ink-soft">疑点：{keepFor.evidence}</div>}
+            <Field label="保留理由（必填，会作为闸门放行依据留档）">
+              <input
+                className="input"
+                autoFocus
+                value={keepReason}
+                placeholder="例如：已查证属实（附出处） / 诗意表达不做史实解读"
+                onChange={(e) => setKeepReason(e.target.value)}
+              />
+            </Field>
+          </div>
+        )}
       </Modal>
 
       <Modal
@@ -835,7 +1074,8 @@ function BriefField({ label, value, action }: { label: string; value: string; ac
 
 /* ------------------------------------------------------------------ 上手引导 */
 
-const GUIDE_STEPS = ['创作简报', '审核歌词', '试听选曲', '配图审核', '精剪交付']
+// 引导卡显示的是「人工节点」（PRD V1.1 §4.5），顶部进度条显示的是「阶段」，两套名称各司其职、全站统一
+const GUIDE_STEPS = ['确认简报', '确认歌词', '确认选曲', '确认配图', '确认精剪']
 
 // 每个状态一句话说清「现在该做什么、按钮在哪」。auto=true 表示机器在跑，用户不用操作。
 const GUIDE: Record<string, { step: number; title: string; desc: string; auto?: boolean }> = {
@@ -853,18 +1093,18 @@ const GUIDE: Record<string, { step: number; title: string; desc: string; auto?: 
   lyric_review: {
     step: 2,
     title: '审核歌词',
-    desc: '先看下面「自动检查」里的黄色卡片 —— 那是 AI 查出的史实/字数/韵脚疑点，逐条点「采纳」或「保留原文」。都没有问题了，再点右上角「确认歌词，进入生曲」。',
+    desc: '先看下面「自动检查」里的黄色卡片 —— 那是 AI 查出的史实/字数/韵脚疑点，逐条「采纳」或「保留原文」（保留需写理由）。疑点清零后，在右侧选生产模式或选型轮，再点右上角确认。',
   },
   music_generating: {
     step: 2,
     title: 'AI 正在生曲',
-    desc: '默认只生成 1 首（省钱）。Mureka 一轮约 2–4 分钟，完成后自动进入选曲。',
+    desc: '生产模式默认只出 1 首（省钱），选型轮按勾选的模型并行出。一般 2–4 分钟，完成后自动进入选曲。',
     auto: true,
   },
   music_review: {
     step: 3,
     title: '试听并选定一版',
-    desc: '在右侧「候选曲目」点播放键试听，满意的那版点「选定这一版」，再点右上角「确认选曲，进入配图」。想比较可以点「换 Mureka 7.6 生成 1 首」再出一版。',
+    desc: '在右侧「候选曲目」试听并打分，选定满意的一版，再点右上角「确认选曲，进入配图」。选型轮是盲听：所有候选都打完分才能选定，选定后揭晓模型。',
   },
   storyboard_generating: {
     step: 4,

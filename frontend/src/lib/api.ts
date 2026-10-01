@@ -58,7 +58,11 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     }
 
     if (!res.ok) {
-      lastError = new Error(await readErrorDetail(res))
+      if (res.status === 401) {
+        // 访问口令未登录 / 已过期：通知 App 切到登录页（PRD V1.1 §11）
+        window.dispatchEvent(new CustomEvent('wenlv:auth-required'))
+      }
+      lastError = new ApiError(await readErrorDetail(res), res.status)
       // 4xx 是业务错误，重试无意义；只重试网关类错误
       if (canRetry && attempt < attempts && RETRYABLE_STATUS.has(res.status)) continue
       throw lastError
@@ -71,7 +75,28 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   throw lastError ?? new Error('请求失败')
 }
 
-const get = <T = any,>(p: string) => req<T>(p)
+/** 带 HTTP 状态码的错误：409 = 闸门不满足（detail 里是逐条原因，用「；」分隔） */
+export class ApiError extends Error {
+  status: number
+  constructor(message: string, status: number) {
+    super(message)
+    this.status = status
+  }
+}
+
+/**
+ * 同一路径的 GET 在途时复用同一个 Promise。
+ * V1.0 的页面轮询不看上一轮是否返回，后端一慢请求就层层堆积（实测几秒内 84 个在途请求），
+ * 越堆越慢、最后整页卡在「加载中」。合并在途请求后，慢的时候最多只有一个在排队。
+ */
+const inflight = new Map<string, Promise<any>>()
+const get = <T = any,>(p: string): Promise<T> => {
+  const hit = inflight.get(p)
+  if (hit) return hit as Promise<T>
+  const pr = req<T>(p).finally(() => inflight.delete(p))
+  inflight.set(p, pr)
+  return pr
+}
 const post = <T = any,>(p: string, body?: unknown) =>
   req<T>(p, { method: 'POST', body: JSON.stringify(body ?? {}) })
 const put = <T = any,>(p: string, body?: unknown) =>
@@ -79,6 +104,11 @@ const put = <T = any,>(p: string, body?: unknown) =>
 const del = <T = any,>(p: string) => req<T>(p, { method: 'DELETE' })
 
 export const api = {
+  // 访问控制
+  authStatus: () => get('/api/auth/status'),
+  login: (password: string) => post('/api/auth/login', { password }),
+  logout: () => post('/api/auth/logout'),
+
   // 系统
   health: () => get('/api/health'),
   systemInfo: () => get('/api/system/info'),
@@ -93,6 +123,8 @@ export const api = {
   project: (id: string) => get(`/api/projects/${id}`),
   advance: (id: string, body?: Json) => post(`/api/projects/${id}/advance`, body ?? {}),
   reject: (id: string, target: string) => post(`/api/projects/${id}/reject`, { target }),
+  /** 已交付（锁定）项目新建修订版 */
+  revise: (id: string) => post(`/api/projects/${id}/revise`),
   projectCalls: (id: string) => get(`/api/projects/${id}/calls`),
   addMetric: (id: string, body: Json) => post(`/api/projects/${id}/metrics`, body),
 
@@ -107,14 +139,16 @@ export const api = {
     post(`/api/projects/${id}/lyrics/rewrite`, { targets, instruction }),
   rollbackLyrics: (id: string, version: number) => post(`/api/projects/${id}/lyrics/rollback/${version}`),
   adoptCheck: (checkId: string, index = 0) => post(`/api/lyrics/checks/${checkId}/adopt`, { index }),
-  resolveCheck: (checkId: string) => post(`/api/lyrics/checks/${checkId}/resolve`),
+  /** 保留原文：必须写理由（PRD V1.1 F2-5） */
+  keepCheck: (checkId: string, reason: string) => post(`/api/lyrics/checks/${checkId}/keep`, { reason }),
 
   // 音乐
   musicModels: () => get('/api/music/models'),
   updateMusicModel: (key: string, body: Json) => put(`/api/music/models/${key}`, body),
   generateMusic: (id: string, body: Json) => post(`/api/projects/${id}/music/generate`, body),
-  candidates: (id: string, round?: number) =>
-    get(`/api/projects/${id}/music/candidates${round ? `?round=${round}` : ''}`),
+  /** 是否盲听由轮次决定（选型轮未揭晓即盲听），前端无法关闭 */
+  candidates: (id: string, roundId?: string) =>
+    get(`/api/projects/${id}/music/candidates${roundId ? `?round_id=${roundId}` : ''}`),
   rate: (cid: string, body: Json) => put(`/api/music/candidates/${cid}/rating`, body),
   selectCandidate: (id: string, cid: string) => post(`/api/projects/${id}/music/select`, { candidate_id: cid }),
   regenerate: (id: string, variants = 2) => post(`/api/projects/${id}/music/regenerate`, { variants }),

@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import type { ReactNode } from 'react'
 import clsx from 'clsx'
 
@@ -112,13 +113,33 @@ export function Modal({
   footer?: ReactNode
   width?: string
 }) {
+  // Esc 关闭（V1.0 只能点 ×）
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open, onClose])
   if (!open) return null
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-ink/35 pt-[8vh] px-4">
-      <div className={clsx('w-full bg-white rounded-card border border-line flex flex-col max-h-[82vh]', width)}>
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center bg-ink/35 pt-[8vh] px-4"
+      onMouseDown={(e) => {
+        // 点遮罩关闭；点弹窗内部不关
+        if (e.target === e.currentTarget) onClose()
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className={clsx('w-full bg-white rounded-card border border-line flex flex-col max-h-[82vh]', width)}
+      >
         <div className="flex items-center justify-between px-4 h-12 border-b border-line shrink-0">
           <h3 className="text-[14px] font-medium">{title}</h3>
-          <button className="text-ink-faint hover:text-ink text-[16px] leading-none" onClick={onClose}>
+          <button className="text-ink-faint hover:text-ink text-[16px] leading-none" onClick={onClose} aria-label="关闭">
             ×
           </button>
         </div>

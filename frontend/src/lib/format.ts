@@ -37,6 +37,8 @@ export function relative(v?: string | null): string {
   const t = new Date(v).getTime()
   if (Number.isNaN(t)) return '—'
   const diff = Math.round((Date.now() - t) / 1000)
+  // 服务器与本机时钟有偏差时可能出现负数（V1.0 出现过「-24624 秒前」），统一显示「刚刚」
+  if (diff < 10) return '刚刚'
   if (diff < 60) return `${diff} 秒前`
   if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`
   if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`
@@ -47,6 +49,7 @@ export const LICENSE_LABEL: Record<string, string> = {
   licensed: '已授权',
   expiring: '即将到期',
   missing: '缺授权',
+  ai_generated: 'AI 生成',
 }
 
 // 成片版本标签：**仅用于展示已生成记录**。可勾选的版本列表从

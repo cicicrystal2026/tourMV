@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from .. import serialize as S
 from .. import state_machine as sm
+from ..config import settings
 from ..db import get_db
 from ..models import AiCall, Project, PublishMetric
 from ..services import dashboard as dash
@@ -82,6 +83,8 @@ def project_detail(project_id: str, db: Session = Depends(get_db)) -> dict:
         "metrics": [S.publish_metric(m) for m in metrics],
         "state": d["state"],
         "gate": d["gate"],
+        # 是否允许占位（mock）结果参与选定：生产环境为 False
+        "allow_mock": settings().allow_mock,
     }
 
 

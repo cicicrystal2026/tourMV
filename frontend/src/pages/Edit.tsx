@@ -39,7 +39,7 @@ export default function EditPage() {
   const [busy, setBusy] = useState('')
   const [err, setErr] = useState('')
   const [msg, setMsg] = useState('')
-  const [projects, setProjects] = useState<any[]>([])
+  const [projects, setProjects] = useState<any[] | null>(null)
   const [showSource, setShowSource] = useState(false)
 
   const audio = useRef<HTMLAudioElement>(null)
@@ -68,7 +68,11 @@ export default function EditPage() {
 
   useEffect(() => {
     if (projectId) load(projectId)
-    else api.projects().then(setProjects)
+    else
+      api
+        .projects()
+        .then(setProjects)
+        .catch((e: any) => setErr(e?.message || String(e)))
   }, [projectId, load])
 
   // 生成/合成中轮询
@@ -76,8 +80,17 @@ export default function EditPage() {
   useEffect(() => {
     if (!projectId) return
     if (!['audio_analyzing', 'rough_cutting', 'rendering'].includes(status)) return
-    const t = setInterval(() => load(projectId), 3000)
-    return () => clearInterval(t)
+    let alive = true
+    let t: number | undefined
+    const tick = async () => {
+      await load(projectId)
+      if (alive) t = window.setTimeout(tick, 3000)
+    }
+    t = window.setTimeout(tick, 3000)
+    return () => {
+      alive = false
+      if (t) clearTimeout(t)
+    }
   }, [projectId, status, load])
 
   const activeClip = useMemo(() => {
@@ -158,13 +171,15 @@ export default function EditPage() {
       <>
         <PageHeader title="剪辑工作台" subtitle="选择一个项目进入" />
         <div className="p-6 grid grid-cols-3 gap-4">
-          {projects.map((p) => (
+          {projects === null && !err && <Spinner />}
+          {err && <Banner tone="error">{err}</Banner>}
+          {(projects || []).map((p) => (
             <button key={p.id} className="card p-4 text-left hover:shadow-sm" onClick={() => nav(`/projects/${p.id}/edit`)}>
               <div className="text-[13px] font-medium">{p.name}</div>
               <div className="mt-1 text-[11px] text-ink-faint">{p.state_label} · {p.destination}</div>
             </button>
           ))}
-          {projects.length === 0 && <Empty text="还没有项目" />}
+          {projects !== null && projects.length === 0 && <Empty text="还没有项目" />}
         </div>
       </>
     )
@@ -222,6 +237,9 @@ export default function EditPage() {
           </span>
         }
         actions={
+          p.locked ? (
+            <span className="text-[11px] text-ink-faint">已交付 · 只读（成片可下载，可回填投放数据）</span>
+          ) : (
           <>
             {p.reject_targets?.length > 0 && (
               <button className="btn" disabled={!!busy} onClick={() => act('reject', () => api.reject(p.id, p.reject_targets[0]), () => load(p.id))}>
@@ -246,13 +264,15 @@ export default function EditPage() {
             {p.status === 'edit_review' && (
               <button
                 className="btn-human"
-                disabled={!!busy || clips.length === 0}
+                disabled={!!busy || clips.length === 0 || !(detail.gate?.ok ?? true)}
+                title={(detail.gate?.reasons || []).join('；')}
                 onClick={() => act('advance', () => api.advance(p.id, { variants }), () => { setMsg('已派发合成任务'); load(p.id) })}
               >
                 确认精剪，生成多版本
               </button>
             )}
           </>
+          )
         }
       />
 

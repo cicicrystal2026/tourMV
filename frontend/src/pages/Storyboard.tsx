@@ -21,7 +21,7 @@ export default function StoryboardPage() {
   const [err, setErr] = useState('')
   const [msg, setMsg] = useState('')
   const [provider, setProvider] = useState('')
-  const [projects, setProjects] = useState<any[]>([])
+  const [projects, setProjects] = useState<any[] | null>(null)
   const [editShot, setEditShot] = useState<any>(null)
   const [draftPrompt, setDraftPrompt] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
@@ -60,8 +60,17 @@ export default function StoryboardPage() {
   )
   useEffect(() => {
     if (!projectId || !working) return
-    const t = setInterval(() => load(projectId).catch(() => {}), 6000)
-    return () => clearInterval(t)
+    let alive = true
+    let t: number | undefined
+    const tick = async () => {
+      await load(projectId).catch(() => {})
+      if (alive) t = window.setTimeout(tick, 6000)
+    }
+    t = window.setTimeout(tick, 6000)
+    return () => {
+      alive = false
+      if (t) clearTimeout(t)
+    }
   }, [projectId, working, load])
 
   async function act(key: string, fn: () => Promise<any>, after?: (r: any) => void) {
@@ -77,8 +86,11 @@ export default function StoryboardPage() {
     }
   }
 
-  const p = detail || {}
-  const isHuman = (p.state_label || '').includes('待')
+  // detail 是 {project, gate, ...}；V1.0 直接取 detail.name，面包屑永远显示「—」
+  const p = detail?.project || {}
+  const isHuman = !!p.waiting_human
+  const locked = !!p.locked
+  const gate = detail?.gate || { ok: true, reasons: [] }
 
   if (!projectId) {
     return (
@@ -86,7 +98,10 @@ export default function StoryboardPage() {
         <PageHeader title="配图审核" subtitle="选择一个项目进入" />
         <div className="p-6">
           {err && <Banner tone="error" onClose={() => setErr('')}>{err}</Banner>}
-          {!projects.length ? (
+          {projects === null ? (
+            // 加载中就显示加载中：V1.0 在这里直接显示「还没有项目」，实际有 5 个
+            !err && <Spinner />
+          ) : !projects.length ? (
             <Empty text="还没有项目" action={<Link className="btn-primary" to="/dashboard">去生产看板新建</Link>} />
           ) : (
             <div className="grid grid-cols-3 gap-4">
@@ -125,10 +140,14 @@ export default function StoryboardPage() {
         subtitle={
           <span className="flex items-center gap-2">
             <span className={isHuman ? 'tag-human' : 'tag-brand'}>{p.state_label || '—'}</span>
-            <span>每句歌词配一张真实景区图，审过才进卡点合成</span>
+            {/* 当前画面由文生图生成，不是实拍；不能写成「真实景区图」（PRD V1.1 D1） */}
+            <span>每句歌词配一个画面（当前为 AI 生成，交付时需标注），审过才进卡点合成</span>
           </span>
         }
         actions={
+          locked ? (
+            <span className="text-[11px] text-ink-faint">已交付 · 只读</span>
+          ) : (
           <>
             <button
               className="btn"
@@ -173,8 +192,8 @@ export default function StoryboardPage() {
             </button>
             <button
               className="btn-human"
-              disabled={!!busy || !prog.total || prog.approved < prog.total}
-              title={prog.approved < prog.total ? '还有未通过的句子' : ''}
+              disabled={!!busy || p.status !== 'storyboard_review' || !gate.ok}
+              title={p.status !== 'storyboard_review' ? '当前不在「待审配图」阶段' : gate.reasons.join('；')}
               onClick={() =>
                 act('advance', () => api.advance(projectId!), () => {
                   setMsg('配图已确认，进入卡点合成')
@@ -185,6 +204,7 @@ export default function StoryboardPage() {
               确认配图，进入卡点
             </button>
           </>
+          )
         }
       />
 
@@ -228,9 +248,18 @@ export default function StoryboardPage() {
           {working && <span className="tag-brand">出图中，自动刷新…</span>}
         </div>
 
-        {!items.length ? (
+        {locked && (
+          <Banner tone="warn">该项目已交付并锁定，只读。需要调整请回词曲工作台「新建修订版」。</Banner>
+        )}
+        {!data ? (
+          !err && <Spinner label="加载配图" />
+        ) : !items.length ? (
           <Empty
-            text="还没有分镜。先「重新提炼景区」，再点「开始/继续出图」。"
+            text={
+              locked
+                ? '该项目没有逐句配图记录（V1.0 时期未经配图审核即交付）。'
+                : '还没有分镜。先「重新提炼景区」，再点「开始/继续出图」。'
+            }
           />
         ) : (
           <div className="grid grid-cols-3 gap-4">
@@ -238,7 +267,8 @@ export default function StoryboardPage() {
               <ShotCard
                 key={s.id}
                 shot={s}
-                busy={busy}
+                // 已交付只读：用一个非空 busy 让卡片上的操作按钮统一置灰
+                busy={locked ? 'locked' : busy}
                 onApprove={() =>
                   act(`ap-${s.id}`, () => api.storyboardApprove(projectId!, s.id), () => load(projectId!))
                 }

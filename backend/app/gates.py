@@ -76,8 +76,7 @@ def check(db: Session, p: Project) -> Gate:
             if r is not None and r.kind == "selection":
                 unrated = []
                 for c in db.execute(select(MusicCandidate).where(
-                        MusicCandidate.round_id == r.id, MusicCandidate.status == "done",
-                        MusicCandidate.is_mock.is_(False))).scalars():
+                        MusicCandidate.round_id == r.id, MusicCandidate.status == "done")).scalars():
                     if db.execute(select(Rating).where(Rating.candidate_id == c.id)).first() is None:
                         unrated.append(c.label)
                 if unrated:

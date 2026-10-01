@@ -346,9 +346,11 @@ def select(db: Session, project_id: str, candidate_id: str) -> dict:
     r = db.get(MusicRound, c.round_id) if c.round_id else None
     if r is not None and r.kind == "selection":
         # 选型轮：所有已完成的真实候选都打过分才能揭晓，否则「盲听评分」名存实亡
+        # 注意不能排除占位候选：演示模式下整轮都是占位，排除后「全部已评分」恒成立，
+        # 等于没评分就能揭晓（E2E 实测抓到的缺陷）。统计里排除占位，评分要求里不排除。
         unrated = [x for x in db.execute(sa_select(MusicCandidate).where(
-            MusicCandidate.round_id == r.id, MusicCandidate.status == "done",
-            MusicCandidate.is_mock.is_(False))).scalars() if _rating_of(db, x.id) is None]
+            MusicCandidate.round_id == r.id, MusicCandidate.status == "done")).scalars()
+            if _rating_of(db, x.id) is None]
         if unrated:
             raise ProjectError(f"选型轮还有 {len(unrated)} 个候选未评分（{'、'.join(sorted(u.label for u in unrated))}），"
                                "全部评分后再选定")

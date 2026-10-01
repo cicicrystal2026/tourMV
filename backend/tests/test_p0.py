@@ -217,6 +217,11 @@ def test_selection_round_blind_and_stats(client, has_real_db):
         if j["type"] == "music_one" and "选型轮" in j["name"]:
             assert "Mureka" not in j["name"] and "Lyria" not in j["name"]
 
+    # 回归（E2E 抓到）：占位候选也必须全部评分后才能揭晓
+    first_mock = payload["items"][0]
+    r = client.post(f"/api/projects/{CHANGBAI}/music/select", json={"candidate_id": first_mock["id"]})
+    assert r.status_code == 400 and "未评分" in r.json()["detail"], "未评分时选型轮不能揭晓（含占位候选）"
+
     # 测统计口径：把本轮候选当作真实结果（mock 不计入统计）
     with SessionLocal() as db:
         for c in db.execute(select(MusicCandidate).where(MusicCandidate.round_id == rid)).scalars():

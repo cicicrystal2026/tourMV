@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { FormEvent } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import Sidebar from './components/Sidebar'
 import Dashboard from './pages/Dashboard'
@@ -18,6 +19,67 @@ const IS_LOCAL = /^(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)$/.test(location.h
 const RETRY_DELAYS = [2000, 5000, 10000]
 
 export default function App() {
+  // 访问口令（PRD V1.1 §11）：null=还在确认，true=需要登录
+  const [needLogin, setNeedLogin] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    const onAuth = () => setNeedLogin(true)
+    window.addEventListener('wenlv:auth-required', onAuth)
+    api
+      .authStatus()
+      .then((s: any) => setNeedLogin(!!s.enabled && !s.authed))
+      // 后端不可达时先放行，由下面的探针给出「后端未连接」提示
+      .catch(() => setNeedLogin(false))
+    return () => window.removeEventListener('wenlv:auth-required', onAuth)
+  }, [])
+
+  if (needLogin === null) return <div className="min-h-screen bg-page" />
+  if (needLogin) return <LoginScreen onDone={() => setNeedLogin(false)} />
+  return <Shell />
+}
+
+function LoginScreen({ onDone }: { onDone: () => void }) {
+  const [pwd, setPwd] = useState('')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    setBusy(true)
+    setErr('')
+    try {
+      await api.login(pwd)
+      onDone()
+    } catch (e: any) {
+      setErr(e?.message || '登录失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="min-h-screen bg-page flex items-center justify-center px-4">
+      <form onSubmit={submit} className="card w-full max-w-[360px] p-6 flex flex-col gap-3">
+        <div>
+          <div className="text-[18px] font-serif">文旅MV 生产管线</div>
+          <div className="text-[12px] text-ink-faint mt-1">实验室内部工具，请输入访问口令</div>
+        </div>
+        <input
+          type="password"
+          className="input"
+          autoFocus
+          placeholder="访问口令"
+          value={pwd}
+          onChange={(e) => setPwd(e.target.value)}
+        />
+        {err && <div className="text-[12px] text-human-dark">{err}</div>}
+        <button className="btn-primary" disabled={busy || !pwd}>
+          {busy ? '验证中…' : '进入'}
+        </button>
+      </form>
+    </div>
+  )
+}
+
+function Shell() {
   const [info, setInfo] = useState<any>(null)
   const [online, setOnline] = useState<boolean | null>(null)
   const [exhausted, setExhausted] = useState(false)
