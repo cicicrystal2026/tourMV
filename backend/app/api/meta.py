@@ -84,11 +84,15 @@ def system_info(db: Session = Depends(get_db)) -> dict:
     from ..adapters import media
     from ..adapters.music import base as mbase
 
+    from ..auth import enabled as auth_enabled
+    from ..services import budget
+
+    # PRD V1.1 §9：只返回就绪状态，不返回 project_root / data_dir / db_path 等服务器路径
     return {
-        "project_root": str(s.project_root),
-        "data_dir": str(s.data_dir),
-        "db_path": str(s.db_path),
         "force_mock": s.force_mock,
+        "allow_mock": s.allow_mock,
+        "auth_enabled": auth_enabled(),
+        "budget": budget.status(db),
         "llm_ready": s.llm_ready,
         "llm_model": s.llm_model,
         "ffmpeg": media.has_ffmpeg(),

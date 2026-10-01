@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -33,6 +34,9 @@ def _advance_if(db: Session, project_id: str, expected: str, target: str) -> boo
         return False
     p.status = target
     p.status_note = sm.spec(target).enter_note
+    if target == "delivered":
+        # 交付即锁定（PRD V1.1 §4.2）：之后只能「新建修订版」
+        p.locked_at = datetime.now(timezone.utc)
     db.commit()
     return True
 
@@ -41,10 +45,35 @@ def _advance_if(db: Session, project_id: str, expected: str, target: str) -> boo
 @handler("lyric_generate")
 def h_lyric_generate(ctx: JobContext) -> None:
     ctx.progress(10, "检索简报与素材卡")
-    ver, real = lyrics_svc.generate(ctx.db, ctx.job().project_id)
+    pid = ctx.job().project_id
+    try:
+        ver, real = lyrics_svc.generate(ctx.db, pid)
+    except Exception as e:
+        # 写词失败不能让项目卡在「写词中」：退回简报阶段并写明原因，用户可直接重新确认
+        ctx.db.rollback()
+        p = ctx.db.get(Project, pid)
+        if p is not None and p.status == "lyric_generating":
+            p.status, p.status_note = "briefing", f"写词失败，已退回简报：{e}"[:300]
+            ctx.db.commit()
+        raise
     ctx.progress(90, "押韵 / 字数 / 史实检查")
     ctx.set_result({"lyric_version_id": ver.id, "version": ver.version, "llm": real})
     _advance_if(ctx.db, ctx.job().project_id, "lyric_generating", "lyric_review")
+
+
+@handler("lyric_check")
+def h_lyric_check(ctx: JobContext) -> None:
+    """只跑自动检查（修订版复制歌词后用）。"""
+    ver = lyrics_svc.latest(ctx.db, ctx.job().project_id)
+    if ver is None:
+        raise RuntimeError("没有歌词版本")
+    ctx.progress(30, "押韵 / 字数 / 史实检查")
+    rows = lyrics_svc.run_checks(ctx.db, ver)
+    p = ctx.db.get(Project, ver.project_id)
+    if p is not None and p.status == "lyric_review":
+        p.status_note = sm.spec("lyric_review").enter_note
+        ctx.db.commit()
+    ctx.set_result({"lyric_version_id": ver.id, "issues": len(rows)})
 
 
 # ------------------------------------------------------------------ 生曲
@@ -64,10 +93,11 @@ def h_music_generate(ctx: JobContext) -> None:
         ).scalars()
     ][:1]
     variants = int(job.payload.get("variants") or 1)
+    mode = job.payload.get("mode") or "production"
     if not models:
         raise RuntimeError("没有启用任何音乐模型")
     ctx.progress(20, f"派发 {len(models)} 个模型 × {variants} 版")
-    out = music_svc.generate(db, pid, models, variants=variants)
+    out = music_svc.generate(db, pid, models, variants=variants, mode=mode)
     ctx.set_result(out)
 
 
@@ -80,16 +110,29 @@ def h_music_one(ctx: JobContext) -> None:
         raise RuntimeError("候选不存在")
     proj = db.get(Project, cand.project_id)
     brief = db.execute(select(Brief).where(Brief.project_id == cand.project_id)).scalar_one_or_none()
-    ver = db.execute(
+    # 用候选创建时绑定的歌词版本，而不是「最新版本」——两者在生成期间可能已经不同
+    ver = (db.get(LyricVersion, cand.lyric_version_id) if cand.lyric_version_id else None) or db.execute(
         select(LyricVersion).where(LyricVersion.project_id == cand.project_id)
         .order_by(LyricVersion.version.desc()).limit(1)
     ).scalar_one_or_none()
+    # 选型轮盲听：任务名 / 进度 / 报错都会出现在公开的任务队列里，一律不带模型名
+    blind = bool(job.payload.get("blind"))
+    who = f"候选 {cand.label}" if blind else f"{cand.model_name} 第 {cand.variant} 版"
 
     cand.status = "running"
     db.commit()
-    ctx.progress(10, f"{cand.model_name} 第 {cand.variant} 版生成中")
+    ctx.progress(10, f"{who} 生成中")
 
     adapter = music_base.resolve(cand.model_key)
+    if adapter.key == "mock":
+        if not settings().allow_mock:
+            # 兜底：生成入口已拦过一次，这里防的是排队期间 Key 被撤掉
+            cand.status, cand.error = "failed", "模型未配置，生产环境禁用占位结果"
+            db.commit()
+            _maybe_finish_round(ctx)
+            raise RuntimeError(f"{who}：模型未配置，已拒绝生成占位结果")
+        cand.is_mock = True
+        db.commit()
     lyrics_text = "\n".join(
         f"[{s.get('name')}]\n" + "\n".join(s.get("lines") or []) for s in (ver.sections if ver else [])
     )
@@ -110,7 +153,7 @@ def h_music_one(ctx: JobContext) -> None:
         while result.status == "running" and waited < GEN_TIMEOUT_S:
             time.sleep(3)
             waited += 3
-            ctx.progress(min(85, 20 + int(waited / max(1, 60))), f"{adapter.name} 生成中 {int(waited)}s")
+            ctx.progress(min(85, 20 + int(waited / max(1, 60))), f"{who} 生成中 {int(waited)}s")
             result = adapter.get_result(jid)
         if result.status != "done" or not result.audio_path:
             raise RuntimeError(result.error or f"{adapter.name} 生成未完成")
@@ -125,34 +168,36 @@ def h_music_one(ctx: JobContext) -> None:
         cand.status = "done"
         db.commit()
 
-        pay, _real = llm.json_chat(
-            prompts.fit_messages(
-                {"genre": brief.genre if brief else "", "mood": brief.mood if brief else [],
-                 "bpm_min": brief.bpm_min if brief else 70, "bpm_max": brief.bpm_max if brief else 100,
-                 "duration_s": brief.duration_s if brief else 180, "vocal": brief.vocal if brief else ""},
-                {"model_name": cand.model_name, "bpm": cand.bpm, "duration_s": cand.duration_s,
-                 "vocal": cand.vocal},
-            ),
-            fallback=prompts.fit_fallback(
-                {"bpm_min": brief.bpm_min if brief else 70, "bpm_max": brief.bpm_max if brief else 100,
-                 "duration_s": brief.duration_s if brief else 180, "vocal": brief.vocal if brief else ""},
-                {"model_name": cand.model_name, "bpm": cand.bpm, "duration_s": cand.duration_s,
-                 "vocal": cand.vocal},
-            ),
-            purpose="fit_score", project_id=cand.project_id,
-        )
-        cand.fit_score = int(pay.get("score") or 0)
-        cand.fit_reason = pay.get("reason", "")
+        # 匹配分只依据客观参数打分。V1.0 把模型名也喂给了 LLM —— 既可能带入品牌偏好，
+        # 理由里还可能直接写出模型名，在盲听时泄露来源。占位结果不打分（F2-17）。
+        if not cand.is_mock:
+            brief_d = {"genre": brief.genre if brief else "", "mood": brief.mood if brief else [],
+                       "bpm_min": brief.bpm_min if brief else 70,
+                       "bpm_max": brief.bpm_max if brief else 100,
+                       "duration_s": brief.duration_s if brief else 180,
+                       "vocal": brief.vocal if brief else ""}
+            cand_d = {"model_name": "", "bpm": cand.bpm, "duration_s": cand.duration_s,
+                      "vocal": cand.vocal}
+            pay, _real = llm.json_chat(
+                prompts.fit_messages(brief_d, cand_d),
+                fallback=prompts.fit_fallback(brief_d, cand_d),
+                purpose="fit_score", project_id=cand.project_id,
+            )
+            cand.fit_score = int(pay.get("score") or 0)
+            cand.fit_reason = pay.get("reason", "")
         if proj:
             proj.total_cost = round((proj.total_cost or 0) + cand.cost, 4)
         db.commit()
-        ctx.progress(95, f"{cand.model_name} 第 {cand.variant} 版完成")
+        ctx.progress(95, f"{who} 完成")
     except Exception as e:
         cand.status = "failed"
         cand.error = f"{type(e).__name__}: {e}"[:1000]
         db.commit()
         # 失败也要判一次本轮是否收尾，否则最后一个候选失败时项目会卡在 music_generating
         _maybe_finish_round(ctx)
+        if blind:
+            # 真实报错（含厂商名）留在候选上，仅在揭晓后可见；队列里只记中性信息
+            raise RuntimeError(f"{who} 生成失败") from None
         raise
 
     _maybe_finish_round(ctx)

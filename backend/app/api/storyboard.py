@@ -9,17 +9,31 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from ..db import get_db
+from .deps import guard_locked
 from ..queue import enqueue
 from ..services import storyboard as svc
 from ..services.projects import ProjectError
 
-router = APIRouter(prefix="/api/projects/{project_id}/storyboard", tags=["storyboard"])
+router = APIRouter(prefix="/api/projects/{project_id}/storyboard", tags=["storyboard"],
+                   dependencies=[Depends(guard_locked)])
 
 MAX_UPLOAD = 40 * 1024 * 1024  # 上传的是「一张图」，给 40MB 足够，也避免误传视频
 
 
 def _fail(e: Exception, code: int = 400):
     raise HTTPException(status_code=code, detail=str(e))
+
+
+def _image_budget(db: Session, project_id: str, count: int | None, provider: str = "") -> None:
+    """出图按张计费：派发前按张数估算，超出当日上限就拒绝（PRD V1.1 §11）。"""
+    from ..adapters import image as image_ad
+    from ..services import budget
+    from ..services import lyrics as lyrics_svc
+
+    if count is None:
+        ver = lyrics_svc.latest(db, project_id)
+        count = len(lyrics_svc.all_lines(ver)) if ver else 0
+    budget.ensure_budget(db, count * image_ad.price(provider or None), what=f"{count} 张配图")
 
 
 @router.get("")
@@ -45,6 +59,7 @@ def generate(project_id: str, provider: str = "", db: Session = Depends(get_db))
     适合「只重做几条」；整批建议走 `POST /enqueue`（进队列，有进度、不占请求）。
     """
     try:
+        _image_budget(db, project_id, None, provider)
         return svc.generate(db, project_id, provider=provider or None)
     except ProjectError as e:
         _fail(e)
@@ -56,6 +71,10 @@ def generate(project_id: str, provider: str = "", db: Session = Depends(get_db))
 def enqueue_generate(project_id: str, provider: str = "",
                      db: Session = Depends(get_db)) -> dict:
     """把「提炼 + 整批出图」丢进队列（推荐，18 句要跑十几到几十分钟）。"""
+    try:
+        _image_budget(db, project_id, None, provider)
+    except ProjectError as e:
+        _fail(e)
     j = enqueue(db, "storyboard_generate", queue="gpu", project_id=project_id,
                 ref_id=project_id, name="逐句生成景区配图",
                 payload={"provider": provider or ""})
@@ -84,6 +103,10 @@ def reject(project_id: str, shot_id: str, note: str = "",
 def regenerate(project_id: str, shot_id: str, prompt: str = "", provider: str = "",
                db: Session = Depends(get_db)) -> dict:
     """驳回重生成一张。走队列 —— 出一张图要 1–2 分钟，不该卡住请求。"""
+    try:
+        _image_budget(db, project_id, 1, provider)
+    except ProjectError as e:
+        _fail(e)
     if prompt.strip():
         row = db.get(svc.StoryboardShot, shot_id)
         if row is not None:

@@ -7,9 +7,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import state_machine as sm
+from ..serialize import dt as iso
 from ..config import settings
 from ..models import Job, Project, RenderJob, TrendCard
 from . import assets as assets_svc
+from . import budget
 from .music import list_models
 
 PIPELINE_STATES = list(sm.STATES)
@@ -47,6 +49,7 @@ def summary(db: Session) -> dict:
         "gpu_queue": gpu_queue(db),
         "device": device_status(db),
         "models": list_models(db),
+        "budget": budget.status(db),
     }
 
 
@@ -54,7 +57,7 @@ def _todo(p: Project) -> dict:
     return {
         "project_id": p.id, "type": sm.TODO_TYPE.get(p.status, "其他"),
         "title": p.name, "status": p.status, "state_label": sm.STATES[p.status].label,
-        "destination": p.destination, "updated_at": p.updated_at,
+        "destination": p.destination, "updated_at": iso(p.updated_at),
         "hint": sm.STATES[p.status].enter_note,
     }
 
@@ -72,7 +75,7 @@ def _columns(projects: list[Project]) -> list[dict]:
                 "status": p.status, "state_label": sm.STATES[p.status].label,
                 "status_note": p.status_note, "destination": p.destination,
                 "waiting_human": sm.is_human(p.status),
-                "updated_at": p.updated_at,
+                "updated_at": iso(p.updated_at),
             } for p in items],
         })
     return cols
@@ -88,8 +91,8 @@ def gpu_queue(db: Session, limit: int = 30) -> list[dict]:
             "id": j.id, "queue": j.queue, "type": j.type, "name": j.name,
             "status": j.status, "progress": j.progress, "vram_mb": j.vram_mb,
             "error": j.error, "retries": j.retries, "project_id": j.project_id,
-            "started_at": j.started_at, "finished_at": j.finished_at,
-            "created_at": j.created_at,
+            "started_at": iso(j.started_at), "finished_at": iso(j.finished_at),
+            "created_at": iso(j.created_at),
         })
     return out
 

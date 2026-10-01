@@ -381,7 +381,8 @@ def timeline_payload(db: Session, project_id: str) -> dict:
     meta = tl.align_meta or {}
     return {
         "timeline": {
-            "id": tl.id, "audio_path": tl.audio_path,
+            # 不返回 audio_path：库里存的是服务器绝对路径（PRD V1.1 §11）
+            "id": tl.id,
             "audio_url": f"/media/music/{basename(tl.audio_path)}" if tl.audio_path else "",
             "bpm": tl.bpm, "duration_s": tl.duration_s,
             "beats": tl.beats, "strong_beats": tl.beats[::4] if tl.beats else [],

@@ -7,13 +7,14 @@ from sqlalchemy.orm import Session
 
 from .. import serialize as S
 from ..db import get_db
+from .deps import guard_locked
 from ..models import Asset, Project, RenderJob, TimelineClip
 from ..queue import enqueue
 from ..services import edit as svc
 from ..services import render as rsvc
 from ..services.projects import ProjectError
 
-router = APIRouter(prefix="/api", tags=["edit"])
+router = APIRouter(prefix="/api", tags=["edit"], dependencies=[Depends(guard_locked)])
 
 
 def _fail(e: Exception):

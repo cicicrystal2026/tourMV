@@ -70,6 +70,8 @@ def project(p: Project) -> dict:
         "total_cost": p.total_cost, "reject_count": p.reject_count,
         "reject_targets": sm.REJECT_TARGETS.get(p.status, []),
         "next_state": sm.next_state(p.status),
+        "locked": p.locked_at is not None, "locked_at": dt(p.locked_at),
+        "parent_project_id": p.parent_project_id,
         "created_at": dt(p.created_at), "updated_at": dt(p.updated_at),
     }
 
@@ -90,13 +92,17 @@ def lyric(v: LyricVersion | None) -> dict | None:
     if v is None:
         return None
     return {"id": v.id, "version": v.version, "sections": v.sections or [],
-            "source": v.source, "created_at": dt(v.created_at)}
+            "source": v.source, "checks_done": bool(v.checks_done),
+            "created_at": dt(v.created_at)}
 
 
 def check(c: LyricCheck) -> dict:
+    # V1.0 的 resolved 就是「保留原文」，统一按 kept 输出
+    status = "kept" if c.status == "resolved" else c.status
     return {"id": c.id, "type": c.type, "section": c.section, "line_no": c.line_no,
-            "text": c.text, "status": c.status, "evidence": c.evidence,
-            "suggestions": c.suggestions or []}
+            "text": c.text, "status": status, "evidence": c.evidence,
+            "suggestions": c.suggestions or [], "keep_reason": c.keep_reason or "",
+            "needs_manual": bool(c.needs_manual)}
 
 
 def model(m: MusicModel, *, capabilities: dict | None = None, effective: str = "",
@@ -108,16 +114,34 @@ def model(m: MusicModel, *, capabilities: dict | None = None, effective: str = "
             "capabilities": capabilities or {}, "effective": effective, "ready": ready}
 
 
-def candidate(c: MusicCandidate, rating: dict | None = None) -> dict:
-    return {
-        "id": c.id, "round": c.round, "label": c.label, "variant": c.variant,
-        "model_key": c.model_key, "model_name": c.model_name,
-        "status": c.status, "error": c.error,
-        "audio_url": media_url("music", c.audio_path),
+def candidate(c: MusicCandidate, rating: dict | None = None, *, blind: bool = False,
+              kind: str = "production") -> dict:
+    """候选曲目。blind=True 时按 PRD V1.1 §9 盲听约束输出：
+
+    - 不返回 model_key / model_name / variant；
+    - 不返回费用与耗时（各家单价、速度差异明显，等于变相报出模型）；
+    - 错误信息只说「生成失败」（适配器报错里带厂商名）；
+    - 音频一律走随机 token 地址，文件名不外泄。
+    """
+    audio_url = f"/api/media/audio/{c.audio_token}" if (c.audio_token and c.audio_path) else ""
+    out = {
+        "id": c.id, "round": c.round, "round_id": c.round_id, "round_kind": kind,
+        "label": c.label, "status": c.status, "audio_url": audio_url,
         "bpm": c.bpm, "duration_s": c.duration_s, "vocal": c.vocal,
-        "fit_score": c.fit_score, "fit_reason": c.fit_reason,
-        "cost": c.cost, "elapsed_s": c.elapsed_s, "rating": rating,
+        "is_mock": bool(c.is_mock),
+        # 占位结果不打匹配分（PRD V1.1 F2-17）
+        "fit_score": None if c.is_mock else c.fit_score,
+        "fit_reason": "占位结果，不评估匹配度" if c.is_mock else c.fit_reason,
+        "rating": rating, "blind": blind,
     }
+    if blind:
+        out.update({"model_key": None, "model_name": None, "variant": None,
+                    "cost": None, "elapsed_s": None,
+                    "error": "生成失败" if c.status == "failed" else ""})
+    else:
+        out.update({"model_key": c.model_key, "model_name": c.model_name, "variant": c.variant,
+                    "cost": c.cost, "elapsed_s": c.elapsed_s, "error": c.error})
+    return out
 
 
 def asset(a: Asset, tags: dict | None = None, score: float | None = None) -> dict:
@@ -130,7 +154,7 @@ def asset(a: Asset, tags: dict | None = None, score: float | None = None) -> dic
         "license_no": a.license_no, "scope": a.scope, "valid_until": a.valid_until,
         "portrait": a.portrait, "has_portrait": a.has_portrait, "usable": a.usable,
         "tag_confidence": a.tag_confidence, "tags": tags or {},
-        "score": score,
+        "score": score, "source": a.source, "is_seed": bool(a.is_seed),
     }
 
 
@@ -180,7 +204,8 @@ def trend_card(c: TrendCard) -> dict:
     return {"id": c.id, "video_id": c.video_id, "week": c.week, "rank": c.rank,
             "song": c.song, "artist": c.artist, "why_hot": c.why_hot,
             "elements": c.elements or {}, "remix": c.remix or {},
-            "metrics": c.metrics or {}, "analyzed_at": c.analyzed_at}
+            "metrics": c.metrics or {}, "analyzed_at": c.analyzed_at,
+            "is_seed": bool(c.is_seed)}
 
 
 def publish_metric(m: PublishMetric) -> dict:

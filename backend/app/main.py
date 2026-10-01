@@ -13,6 +13,8 @@ from fastapi.staticfiles import StaticFiles
 
 from . import queue as q
 from .api import api_router
+from .auth import AuthMiddleware
+from .auth import router as auth_router
 from .config import settings
 from .db import init_db
 
@@ -37,6 +39,9 @@ async def lifespan(app: FastAPI):
 
     with session_scope() as db:
         music_svc.ensure_models(db)
+        # 战绩是派生数据：启动时按当前口径（只算已揭晓的选型轮）重算一遍，
+        # 口径变更后不会残留旧值（V1.0 的「均分 12」就是旧口径的三项总和）
+        music_svc.recompute_model_stats(db)
         trends_svc.seed_demo(db)          # 无真实 trends.db 时提供示例素材卡
         assets_svc.seed_demo_assets(db)   # 空素材库时生成占位镜头，便于跑通全流程
     q.start(s.api_concurrency, s.gpu_concurrency)
@@ -45,8 +50,11 @@ async def lifespan(app: FastAPI):
     q.stop()
 
 
-app = FastAPI(title="文旅MV生产管线 V1.0", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="文旅MV生产管线 V1.1", version="1.1.0", lifespan=lifespan)
 
+# 访问控制先加、CORS 后加：Starlette 里后加的中间件在外层，
+# 这样 401 响应也会带上 CORS 头，本地 5173 开发时前端能读到「需要登录」。
+app.add_middleware(AuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -55,6 +63,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth_router)
 app.include_router(api_router)
 
 _s = settings()
@@ -130,7 +139,36 @@ def media_renders(filename: str, request: Request):
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True, "data_dir": str(_s.data_dir)}
+    # 不返回 data_dir 等服务器路径（PRD V1.1 §11）；该接口免登录，只给探活用
+    return {"ok": True}
+
+
+@app.api_route("/api/media/audio/{token}", methods=["GET", "HEAD"], include_in_schema=False)
+def media_audio(token: str):
+    """候选音频只通过随机 token 访问（PRD V1.1 §9 盲听约束）。
+
+    文件名里带着模型或 mock 字样（如 mureka-xxx.mp3 / mock-xxx.mp3），
+    直接用 /media/music/<文件名> 就等于在盲听时把答案写在地址栏里。
+    走 /api 前缀，是为了在 EdgeOne 线上也由边缘函数反代到后端（/media 是静态镜像）。
+    """
+    from sqlalchemy import select
+
+    from .db import SessionLocal
+    from .models import MusicCandidate
+
+    if not token or len(token) > 40:
+        raise HTTPException(status_code=404, detail="Not Found")
+    with SessionLocal() as db:
+        c = db.execute(select(MusicCandidate).where(MusicCandidate.audio_token == token)
+                       ).scalar_one_or_none()
+        path = c.audio_path if c else ""
+    music_dir = (_s.data_dir / "music").resolve()
+    local = (music_dir / path.replace("\\", "/").rsplit("/", 1)[-1]).resolve() if path else None
+    if not local or not local.is_file() or music_dir not in local.parents:
+        raise HTTPException(status_code=404, detail="Not Found")
+    media_type = "audio/wav" if local.suffix.lower() == ".wav" else "audio/mpeg"
+    # 不带原文件名（Content-Disposition），避免下载时暴露
+    return FileResponse(local, media_type=media_type)
 
 
 # ---------------------------------------------------------------- 前端单端口托管

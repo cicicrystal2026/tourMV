@@ -13,6 +13,20 @@ class ProjectError(Exception):
     pass
 
 
+class GateError(ProjectError):
+    """闸门不满足：接口返回 409，并附带全部原因（前端逐条展示）。"""
+
+    def __init__(self, reasons: list[str]):
+        super().__init__("；".join(reasons))
+        self.reasons = reasons
+
+
+def ensure_editable(p: Project) -> None:
+    """已交付项目只读（PRD V1.1 §4.2）。所有会改动项目内容的入口都要先过这里。"""
+    if p.locked_at is not None:
+        raise ProjectError("项目已交付并锁定，只读；如需修改请「新建修订版」")
+
+
 def create(db: Session, *, name: str, destination: str, type_: str = "sample",
            language: str = "zh", trend_card_ids: list[str] | None = None,
            mood: list[str] | None = None, genre: str = "", bpm_min: int = 70,
@@ -54,25 +68,35 @@ def advance(db: Session, project_id: str, payload: dict | None = None) -> dict:
     payload 用于把界面上的选择（如勾选的模型、每模型版数）带进被派发的任务，
     避免"确认歌词"与"批量生成"两条路径重复触发。
     """
+    from .. import gates
+
     p = get(db, project_id)
+    ensure_editable(p)
     nxt = sm.next_state(p.status)
     if nxt is None:
         raise ProjectError(f"项目已处于终态「{sm.STATES[p.status].label}」，无法继续推进")
+    if not sm.is_human(p.status) and p.status != "briefing":
+        raise ProjectError(f"「{sm.STATES[p.status].label}」由系统自动推进，请等待完成")
 
-    # 配图闸门：没审完不许往下走 —— 否则会拿没确认的图去卡点合成，
-    # 等于白跑一次渲染（渲染是这条链路上最贵的一步）。
-    if p.status == "storyboard_review" and not (payload or {}).get("force"):
-        from . import storyboard as storyboard_svc
+    # 闸门（PRD V1.1 §4.2）：不再提供 force 绕过 —— V1.0 正是靠前端置灰挡人，
+    # 接口本身照样能推进，才出现「已交付项目还挂着未处理疑点」。
+    g = gates.check(db, p)
+    if not g.ok:
+        raise GateError(g.reasons)
 
-        prog = storyboard_svc.progress(db, p.id)
-        if prog["total"] and not prog["all_approved"]:
-            raise ProjectError(
-                f"还有 {prog['total'] - prog['approved']} 句配图未通过审核，"
-                "全部确认后才能进入卡点合成"
-            )
-
-    dispatched = _dispatch(db, p, nxt, payload or {})
+    # 先切状态再派发：派发出去的任务可能很快跑完并尝试「从 X 推进到下一步」，
+    # 如果此时状态还没切过去，推进条件不成立，项目就会卡死在中间态。
+    # 派发失败（如模型未配置、超预算）则回滚到原状态，错误原样抛给界面。
+    prev, prev_note = p.status, p.status_note
     set_state(db, p, nxt)
+    try:
+        dispatched = _dispatch(db, p, nxt, payload or {})
+    except Exception:
+        db.rollback()
+        p = get(db, project_id)
+        set_state(db, p, prev, prev_note)
+        raise
+    db.refresh(p)
     return {"status": p.status, "dispatched": dispatched}
 
 
@@ -83,10 +107,15 @@ def _dispatch(db: Session, p: Project, target_state: str, payload: dict | None =
         enqueue(db, "lyric_generate", project_id=p.id, ref_id=p.id, name="生成歌词")
         return "lyric_generate"
     if target_state == "music_generating":
-        enqueue(db, "music_generate", project_id=p.id, ref_id=p.id, name="多模型批量生曲",
-                payload={"models": payload.get("models") or [],
-                         "variants": int(payload.get("variants") or 2)})
-        return "music_generate"
+        mode = "selection" if payload.get("mode") == "selection" else "production"
+        # 先在请求里校验并创建候选（模型未配置、超预算等错误要当场报给用户，
+        # 而不是进了队列才在后台失败、项目卡在「生曲中」）
+        from . import music as music_svc
+
+        out = music_svc.generate(db, p.id, payload.get("models") or [],
+                                 variants=int(payload.get("variants") or (2 if mode == "selection" else 1)),
+                                 mode=mode)
+        return f"music:{mode}:{out['created']}"
     if target_state == "storyboard_generating":
         # 逐句配图：提炼景区 → 出图 → 等人工审核。「配图审核」闸门在界面里做，
         # 任务只负责把图准备好。
@@ -107,6 +136,7 @@ def _dispatch(db: Session, p: Project, target_state: str, payload: dict | None =
 
 def reject(db: Session, project_id: str, target: str) -> dict:
     p = get(db, project_id)
+    ensure_editable(p)
     sm.assert_can_reject(p.status, target)
     p.reject_count += 1
     p.selected_candidate_id = None if target in ("music_generating", "lyric_review") else p.selected_candidate_id
@@ -114,7 +144,46 @@ def reject(db: Session, project_id: str, target: str) -> dict:
     return {"status": p.status, "reject_count": p.reject_count}
 
 
+def revise(db: Session, project_id: str) -> Project:
+    """已交付项目「新建修订版」：复制简报与最新歌词，原版本保持只读（PRD V1.1 §4.2）。
+
+    新项目停在「待确认歌词」，并重跑一次自动检查 —— 修订的起点是重新过闸门，
+    不继承原版本的检查结论。
+    """
+    from ..models import LyricVersion as LV
+
+    src = get(db, project_id)
+    if src.locked_at is None:
+        raise ProjectError("只有已交付（锁定）的项目需要新建修订版，进行中的项目直接修改即可")
+    n = len(list(db.execute(select(Project).where(Project.parent_project_id == src.id)).scalars())) + 1
+    p = Project(name=f"{src.name}（修订{n}）"[:200], destination=src.destination, type=src.type,
+                language=src.language, subtitle_language=src.subtitle_language,
+                status="briefing", status_note=sm.STATES["briefing"].enter_note,
+                parent_project_id=src.id)
+    db.add(p)
+    db.flush()
+    b = brief_of(db, src.id)
+    if b is not None:
+        db.add(Brief(project_id=p.id, mood=list(b.mood or []), genre=b.genre, bpm_min=b.bpm_min,
+                     bpm_max=b.bpm_max, duration_s=b.duration_s, vocal=b.vocal,
+                     style_prompt=b.style_prompt, trend_card_ids=list(b.trend_card_ids or []),
+                     kb_refs=list(b.kb_refs or []), forbidden=b.forbidden))
+    lv = db.execute(select(LV).where(LV.project_id == src.id).order_by(LV.version.desc())
+                    .limit(1)).scalar_one_or_none()
+    if lv is not None:
+        db.add(LV(project_id=p.id, version=1, sections=lv.sections, source="manual",
+                  checks_done=False))
+        p.status, p.status_note = "lyric_review", "修订版：已复制原歌词，正在重新检查"
+    db.commit()
+    db.refresh(p)
+    if lv is not None:
+        enqueue(db, "lyric_check", project_id=p.id, ref_id=p.id, name="押韵 / 字数 / 史实检查")
+    return p
+
+
 def detail(db: Session, project_id: str) -> dict:
+    from .. import gates
+
     p = get(db, project_id)
     b = brief_of(db, p.id)
     lyric = db.execute(
@@ -137,8 +206,10 @@ def detail(db: Session, project_id: str) -> dict:
             "column": sm.column_of(p.status),
             "human": sm.is_human(p.status),
             "next": sm.next_state(p.status),
-            "reject_targets": sm.REJECT_TARGETS.get(p.status, []),
+            "reject_targets": [] if p.locked_at else sm.REJECT_TARGETS.get(p.status, []),
         },
+        # 当前人工节点能否推进、为什么不能 —— 前端据此置灰主按钮并逐条展示原因
+        "gate": gates.check(db, p).as_dict(),
     }
 
 

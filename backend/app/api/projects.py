@@ -81,6 +81,7 @@ def project_detail(project_id: str, db: Session = Depends(get_db)) -> dict:
         "renders": [S.render_job(r) for r in d["renders"]],
         "metrics": [S.publish_metric(m) for m in metrics],
         "state": d["state"],
+        "gate": d["gate"],
     }
 
 
@@ -89,9 +90,22 @@ def advance(project_id: str, payload: dict | None = Body(default=None),
             db: Session = Depends(get_db)) -> dict:
     try:
         r = svc.advance(db, project_id, payload or {})
+    except svc.GateError as e:
+        # 409：闸门不满足。detail 是字符串（兼容旧前端），reasons 给逐条原因
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except (ProjectError, sm.StateTransitionError) as e:
         _fail(e)
     return {**r, "project": S.project(svc.get(db, project_id))}
+
+
+@router.post("/projects/{project_id}/revise")
+def revise(project_id: str, db: Session = Depends(get_db)) -> dict:
+    """已交付项目新建修订版（PRD V1.1 §4.2）。"""
+    try:
+        p = svc.revise(db, project_id)
+    except ProjectError as e:
+        _fail(e)
+    return S.project(p)
 
 
 @router.post("/projects/{project_id}/reject")

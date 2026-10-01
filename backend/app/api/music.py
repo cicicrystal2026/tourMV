@@ -40,12 +40,16 @@ def update_model(key: str, payload: dict = Body(...), db: Session = Depends(get_
 
 @router.post("/projects/{project_id}/music/generate")
 def generate(project_id: str, payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    """mode=production（默认，生产模式）/ selection（选型轮，强制盲听）。"""
+    mode = payload.get("mode") or "production"
     try:
         out = svc.generate(
             db, project_id,
             model_keys=payload.get("models") or [],
-            variants=int(payload.get("variants") or 1),
+            variants=int(payload.get("variants") or (2 if mode == "selection" else 1)),
             style_prompt=payload.get("style_prompt"),
+            mode=mode,
+            round_id=payload.get("round_id") or None,
         )
     except ProjectError as e:
         _fail(e)
@@ -53,9 +57,11 @@ def generate(project_id: str, payload: dict = Body(...), db: Session = Depends(g
 
 
 @router.get("/projects/{project_id}/music/candidates")
-def candidates(project_id: str, round: int | None = None, db: Session = Depends(get_db)) -> dict:
-    return {"round": round or svc.current_round(db, project_id),
-            "items": svc.candidates(db, project_id, round)}
+def candidates(project_id: str, round: int | None = None, round_id: str | None = None,
+               blind: bool | None = None, db: Session = Depends(get_db)) -> dict:
+    """候选列表。是否盲听由**轮次状态**决定（选型轮未揭晓即盲听），
+    与 blind 参数无关 —— 客户端不能通过 blind=false 把模型信息要回来。"""
+    return svc.candidates_payload(db, project_id, round_id=round_id, round_no=round)
 
 
 @router.put("/music/candidates/{candidate_id}/rating")

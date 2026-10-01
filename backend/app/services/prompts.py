@@ -50,7 +50,10 @@ def lyrics_messages(destination: str, genre: str, mood: list[str], duration_s: i
         "2. 结构按段落输出，段落名用：主歌1/预副歌/副歌/主歌2/桥段/尾副歌；\n"
         "3. 副歌要有一句能被记住的记忆点；\n"
         "4. 只写原创内容，不得引用任何已有歌曲的歌词、歌名或艺人名；\n"
-        "5. 只输出 JSON：{\"sections\":[{\"name\":\"主歌1\",\"lines\":[\"…\"]}]}"
+        "5. 地名与景物要自然融入句子，不要把「省市·景区」这种带间隔号的整串目的地名原样塞进歌词，"
+        "不要写「我想带你去××」「如果远方有名字」这类可套用任何城市的模板句；\n"
+        "6. 只写你确信真实的地理、历史与文化细节；拿不准的宁可写意，不要编造年代、名称或典故；\n"
+        "7. 只输出 JSON：{\"sections\":[{\"name\":\"主歌1\",\"lines\":[\"…\"]}]}"
     )
     user = (
         f"目的地：{destination}\n曲风：{genre}\n情绪：{'、'.join(mood) or '治愈、辽阔'}\n"
@@ -104,14 +107,33 @@ def rewrite_fallback(lines: list[str]) -> dict:
 
 # ------------------------------------------------------------------ 3 自动检查
 def check_messages(sections: list[dict], destination: str) -> list[dict]:
-    sys = ("你是中文歌词审校。对每行做三项检查：rhyme(押韵)、meter(字数节奏 6-12 字)、"
-           "fact(地名/历史/文化是否真实准确)。只输出 JSON："
-           "{\"issues\":[{\"type\":\"rhyme|meter|fact\",\"section\":\"主歌1\",\"line_no\":3,"
-           "\"text\":\"原行\",\"status\":\"pending|resolved\",\"evidence\":\"依据\","
-           "\"suggestions\":[\"建议1\",\"建议2\"]}]}。没有问题的行不要输出。")
-    body = "\n".join(f"[{s['name']}]\n" + "\n".join(s.get("lines", [])) for s in sections)
+    """押韵与史实检查（字数由规则计算，不交给 LLM —— 它数不准中文字数）。"""
+    sys = (
+        "你是中文歌词审校。只做两项检查：\n"
+        "rhyme：同一段内句尾韵脚明显不协调的行；\n"
+        "fact：地名、历史、文化表述中你**有把握判断为错误或高度存疑**的行。"
+        "存疑但不确定的，evidence 写明「需人工核实」及理由，不要断言对错；"
+        "真实存在的地名、物产不要因为你不熟悉就判错。\n"
+        "suggestions 必须是可直接替换原行的**完整一句歌词**：6-12 个汉字、保留原意与意象、"
+        "与上下句押韵；不得截断原句，不得只改最后一个字凑韵；给不出合格改写就返回空数组。\n"
+        "只输出 JSON：{\"issues\":[{\"type\":\"rhyme|fact\",\"section\":\"主歌1\",\"line_no\":3,"
+        "\"text\":\"原行\",\"evidence\":\"依据\",\"suggestions\":[\"完整改写1\",\"完整改写2\"]}]}。"
+        "line_no 从 1 开始、按段落内计数。没有问题的行不要输出。"
+    )
+    body = "\n".join(f"[{s['name']}]\n" + "\n".join(f"{i}. {ln}" for i, ln in enumerate(s.get("lines", []), 1))
+                     for s in sections)
     return [{"role": "system", "content": sys},
             {"role": "user", "content": f"目的地：{destination}\n歌词：\n{body}"}]
+
+
+def meter_fix_messages(items: list[dict], destination: str) -> list[dict]:
+    """把字数越界的行整句改写到 6-12 字（替代 V1.0 的「截断到 8 / 10 字」）。"""
+    sys = ("你是中文歌词编辑。把每一行改写为 6-12 个汉字的完整句子（不计标点），"
+           "保留原意、意象与句尾韵脚，读起来要像歌词而不是摘要。不得截断原句。"
+           "每行给 2 个改写。只输出 JSON：{\"items\":[{\"id\":0,\"suggestions\":[\"…\",\"…\"]}]}")
+    body = "\n".join(f"{it['id']}. （{it['section']}）{it['text']}" for it in items)
+    return [{"role": "system", "content": sys},
+            {"role": "user", "content": f"目的地：{destination}\n需要改写的行：\n{body}"}]
 
 
 _PLACE_WORDS = ["塔", "寺", "桥", "城墙", "古道", "码头", "书院", "牌坊", "码头", "石窟"]
@@ -119,36 +141,29 @@ _FACT_MARKERS = ["年", "代", "千", "百", "第一", "最"]
 
 
 def check_fallback(sections: list[dict], destination: str) -> dict:
-    """本地规则兜底：字数越界、句尾不押韵、含地标或年代表述 → 待确认。"""
+    """LLM 不可用时的本地规则兜底：只标出疑点，**不给改写建议**。
+
+    V1.0 的兜底会「截断到 8/10 字」「把最后一个字换成韵脚字」，产出
+    「雾还没江」「我想带你去桂林·」这种不成句的建议 —— 宁可不给，让人来改。
+    字数检查已由 lyrics.run_checks 用规则单独计算，这里只管押韵与史实。
+    """
     issues: list[dict] = []
     all_lines: list[tuple[str, int, str]] = []
     for s in sections:
         for i, ln in enumerate(s.get("lines", []), 1):
             all_lines.append((s["name"], i, ln))
 
-    # meter
-    for name, i, ln in all_lines:
-        n = len(ln.replace(" ", ""))
-        if n < 6 or n > 12:
-            issues.append({
-                "type": "meter", "section": name, "line_no": i, "text": ln,
-                "status": "pending", "evidence": f"当前 {n} 字，要求 6-12 字",
-                "suggestions": [ln] if n < 6 else [f"{ln[:8]}", f"{ln[:10]}"],
-            })
-
-    # rhyme：取副歌各行尾字作为基准韵
+    # rhyme：取副歌各行尾字作为基准韵（只提示，不自动改）
     chorus = [ln for n, _, ln in all_lines if "副歌" in n]
     if chorus:
         tails = [ln.strip()[-1] for ln in chorus if ln.strip()]
-        base = max(set(tails), key=tails.count)
+        base = max(set(tails), key=tails.count) if tails else ""
         for name, i, ln in all_lines:
-            if not ln.strip():
-                continue
-            if ln.strip()[-1] != base and name in ("主歌1", "主歌2", "预副歌"):
+            if base and ln.strip() and ln.strip()[-1] != base and name in ("主歌1", "主歌2", "预副歌"):
                 issues.append({
                     "type": "rhyme", "section": name, "line_no": i, "text": ln,
-                    "status": "pending", "evidence": f"副歌基准韵脚为「{base}」",
-                    "suggestions": [ln.strip()[:-1] + base],
+                    "evidence": f"副歌基准韵脚为「{base}」，本行句尾「{ln.strip()[-1]}」（规则检查，供参考）",
+                    "suggestions": [],
                 })
 
     # fact：含地标或年代表述的行需要人工确认
@@ -156,20 +171,20 @@ def check_fallback(sections: list[dict], destination: str) -> dict:
         if any(w in ln for w in _PLACE_WORDS) or any(m in ln for m in _FACT_MARKERS):
             issues.append({
                 "type": "fact", "section": name, "line_no": i, "text": ln,
-                "status": "pending",
                 "evidence": f"涉及「{destination or '目的地'}」的具体地理/历史表述，需核对公开资料",
-                "suggestions": [f"把「{ln}」改为不含具体年代与地名的写法"],
+                "suggestions": [],
             })
     return {"issues": issues[:12], "mock": True}
 
 
 # ------------------------------------------------------------------ 4 简报匹配分
 def fit_messages(brief: dict, cand: dict) -> list[dict]:
+    # 不提供模型名：匹配分只看客观参数；理由里也不能出现模型/厂商名（盲听约束）
     sys = ("你是音乐 A&R。根据创作简报与候选曲目的客观参数，给出 0-100 的匹配分与一句话理由。"
-           "只输出 JSON：{\"score\":85,\"reason\":\"…\"}")
+           "理由中不要提及任何模型、厂商或品牌名。只输出 JSON：{\"score\":85,\"reason\":\"…\"}")
     user = (f"简报：曲风={brief.get('genre')} 情绪={brief.get('mood')} "
             f"BPM区间={brief.get('bpm_min')}-{brief.get('bpm_max')} 时长={brief.get('duration_s')}s\n"
-            f"候选：模型={cand.get('model_name')} BPM={cand.get('bpm')} 时长={cand.get('duration_s')}s "
+            f"候选：BPM={cand.get('bpm')} 时长={cand.get('duration_s')}s "
             f"声线={cand.get('vocal')}")
     return [{"role": "system", "content": sys}, {"role": "user", "content": user}]
 

@@ -30,8 +30,9 @@ class Settings:
     def __init__(self) -> None:
         _load_env()
         self.project_root = PROJECT_ROOT
-        self.data_dir = DATA_DIR
-        self.db_path = DATA_DIR / "wenlv.db"
+        # DATA_DIR 可覆盖：自动化测试指向临时目录，避免污染真实数据
+        self.data_dir = Path(os.environ.get("DATA_DIR") or DATA_DIR)
+        self.db_path = self.data_dir / "wenlv.db"
         # 前端构建产物。存在时由本进程单端口托管（线上环境沙箱只给一个端口）；
         # 本地开发时不放这个目录，前端仍走 vite dev server，互不影响。
         self.webapp_dir = Path(os.environ.get("WEBAPP_DIR", PROJECT_ROOT / "backend" / "webapp"))
@@ -99,6 +100,23 @@ class Settings:
 
         # 运行模式：mock 时所有外部调用走本地假实现
         self.force_mock = os.environ.get("FORCE_MOCK", "1") == "1"
+        # PRD V1.1 §11 数据隔离：是否允许用 mock 占位结果。
+        # 生产环境必须关掉 —— 否则未配 Key 的模型会静默产出占位音频，混进候选与统计。
+        # 全局 FORCE_MOCK 时自动允许（那本来就是「整站演示」模式）。
+        self.allow_mock = self.force_mock or os.environ.get("ALLOW_MOCK", "0") == "1"
+
+        # PRD V1.1 §11 安全：访问口令。留空 = 不启用（仅限本机开发）。
+        # 线上部署必须配置，否则任何人都能读数据、触发付费生成。
+        self.access_password = os.environ.get("ACCESS_PASSWORD", "")
+        # 登录 cookie 的签名密钥；不配则由口令派生（换口令即全部失效）
+        self.session_secret = os.environ.get("SESSION_SECRET", "") or (
+            "wenlv:" + self.access_password if self.access_password else "")
+        # 生成类接口的每日费用上限（元）。0 = 不限。按服务器本地日期累计。
+        self.daily_cost_limit = float(os.environ.get("DAILY_COST_LIMIT", "30") or 0)
+
+        # PRD V1.1 §7.2 选型轮参赛模型（盲听对比只在这些模型间进行）
+        self.selection_model_keys = csv_list(
+            os.environ.get("SELECTION_MODEL_KEYS", "mureka,lyria,minimax"))
 
     @property
     def llm_ready(self) -> bool:

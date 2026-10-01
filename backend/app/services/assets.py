@@ -233,7 +233,9 @@ def detail(db: Session, asset_id: str) -> dict:
     usage = list(db.execute(select(TimelineClip).where(TimelineClip.asset_id == a.id)).scalars())
     return {
         "id": a.id, "name": a.name, "destination": a.destination,
-        "file_path": a.file_path,
+        # 只给文件名：完整路径是服务器目录结构（PRD V1.1 §11）
+        "file_path": basename(a.file_path),
+        "source": a.source, "is_seed": a.is_seed,
         "thumb_url": f"/media/thumbs/{basename(a.thumb_path)}" if a.thumb_path else "",
         "video_url": f"/media/assets/{basename(a.file_path)}" if a.file_path else "",
         "duration_s": a.duration_s, "width": a.width, "height": a.height, "fps": a.fps,
@@ -260,24 +262,31 @@ def _expiring_soon(valid_until: str) -> bool:
 
 def stats(db: Session) -> dict:
     rows = list(db.execute(select(Asset)).scalars())
-    licensed = len([a for a in rows if a.license_status == "licensed"])
-    expiring = len([a for a in rows if _expiring_soon(a.valid_until)])
-    missing = len([a for a in rows if a.license_status == "missing"])
+    shot = [a for a in rows if a.source != "ai"]
+    # 「已授权」只统计实拍素材：AI 生成的画面没有第三方授权可言（PRD V1.1 F4-10）
+    licensed = len([a for a in shot if a.license_status == "licensed"])
+    expiring = len([a for a in shot if _expiring_soon(a.valid_until)])
+    missing = len([a for a in shot if a.license_status == "missing"])
     review = len([a for a in rows if a.tag_confidence < CONF_THRESHOLD])
     return {"total": len(rows), "licensed": licensed, "expiring": expiring,
             "missing": missing, "unusable": len([a for a in rows if not a.usable]),
-            "need_review": review}
+            "need_review": review, "shot": len(shot), "ai": len(rows) - len(shot),
+            "seed": len([a for a in rows if a.is_seed])}
 
 
 def export_license_csv(db: Session) -> str:
     rows = list(db.execute(select(Asset)).scalars())
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["素材名", "文件", "目的地", "授权状态", "授权方", "授权编号",
+    w.writerow(["素材名", "文件", "来源", "目的地", "授权状态", "授权方", "授权编号",
                 "授权范围", "有效期", "肖像权", "可用", "使用项目数"])
     for a in rows:
         n = len(list(db.execute(select(TimelineClip).where(TimelineClip.asset_id == a.id)).scalars()))
-        w.writerow([a.name, a.file_path, a.destination, a.license_status, a.licensor,
+        # 只导出相对路径：绝对路径会泄露服务器目录结构（PRD V1.1 F4-9）
+        p = (a.file_path or "").replace("\\", "/")
+        rel = p.split("/data/", 1)[1] if "/data/" in p else p.rsplit("/", 1)[-1]
+        w.writerow([a.name, rel, "AI 生成" if a.source == "ai" else ("演示" if a.is_seed else "实拍"),
+                    a.destination, a.license_status, a.licensor,
                     a.license_no, a.scope, a.valid_until, a.portrait,
                     "是" if a.usable else "否", n])
     return buf.getvalue()
@@ -298,6 +307,9 @@ DEMO_ASSETS = [
     ("村落_固定_清晨_雾.mp4", "安徽·宏村", 7.0, "黄山文旅", "村落 固定 清晨 雾"),
     ("大桥_夜晚_延时_神秘.mp4", "重庆·千厮门", 8.0, "重庆文旅", "大桥 夜晚 延时 神秘"),
 ]
+# 种子素材名（含下面那条肖像权验证用的素材）。它们是 ffmpeg 合成的占位镜头，
+# 授权方与编号也是虚构的，迁移时据此打 is_seed，避免被当成真实授权素材进入样片。
+DEMO_ASSET_NAMES = {Path(f).stem for f, *_ in DEMO_ASSETS} | {"人物_街景_手持_晴"}
 
 
 def seed_demo_assets(db: Session, overwrite: bool = False) -> dict:
@@ -319,7 +331,7 @@ def seed_demo_assets(db: Session, overwrite: bool = False) -> dict:
             licensor=licensor, license_no=f"WL-2026-{i + 1:04d}",
             scope="线上投放（含海外平台）",
             valid_until=(date.today() + timedelta(days=20 if i % 5 == 3 else 900)).isoformat(),
-            portrait="", has_portrait=False, usable=True,
+            portrait="", has_portrait=False, usable=True, is_seed=True,
         )
         db.add(a)
         db.commit()
@@ -337,7 +349,7 @@ def seed_demo_assets(db: Session, overwrite: bool = False) -> dict:
               duration_s=6.0, width=1920, height=1080, fps=25.0, license_status="licensed",
               licensor="成都文旅", license_no="WL-2026-0999", scope="线上投放",
               valid_until=(date.today() + timedelta(days=400)).isoformat(),
-              portrait="", has_portrait=True, usable=True)
+              portrait="", has_portrait=True, usable=True, is_seed=True)
     db.add(a)
     db.commit()
     # 缩略图要真的抽出来并回写：这条不能只写 thumb_path 常量，
@@ -445,8 +457,9 @@ def _upsert_ai_asset(db: Session, *, name: str, clip: str, thumb: str,
     a.destination = destination
     a.duration_s = round(float(media.probe(Path(clip)).get("duration_s") or seconds), 2)
     a.width, a.height, a.fps = 1920, 1080, 25.0
-    # AI 生成产物不涉及第三方权利，按「自有素材」登记，授权台账里可一眼区分
-    a.license_status = "licensed"
+    # AI 生成产物没有第三方授权，单列来源与授权口径，不计入「已授权」（PRD V1.1 F4-10）
+    a.source = "ai"
+    a.license_status = "ai_generated"
     a.licensor = "AI 生成（通义万相）"
     a.license_no = f"AI-{date.today().strftime('%Y%m%d')}"
     a.scope = "线上投放（含海外平台）"

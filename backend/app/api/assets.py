@@ -60,6 +60,11 @@ def generate_ai(payload: dict = Body(...), db: Session = Depends(get_db)) -> dic
     if not dest:
         raise HTTPException(status_code=400, detail="请提供 destination（目的地）")
     try:
+        from ..adapters import image as image_ad
+        from ..services import budget
+
+        n = max(1, min(12, int(payload.get("count") or 6)))
+        budget.ensure_budget(db, n * image_ad.price(), what=f"{n} 张 AI 素材")
         return svc.generate_ai_assets(
             db,
             destination=dest,

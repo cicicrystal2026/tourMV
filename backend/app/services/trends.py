@@ -211,7 +211,7 @@ def seed_demo(db: Session, weeks: int = 3) -> dict:
             metrics={"views_total": 3_000_000 - i * 400_000, "views_gained": 2_100_000 - i * 300_000,
                      "views_per_day": 420_000 - i * 60_000, "engagement": 0.068 - i * 0.012,
                      "trending_regions": 3 - i + 1, "sources": "trending,search:healing"},
-            analyzed_at=dt.datetime.now().isoformat(),
+            analyzed_at=dt.datetime.now().isoformat(), is_seed=True,
         ))
     db.commit()
     return {"snapshots": made, "cards": len(_DEMO_CARDS)}

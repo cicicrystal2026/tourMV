@@ -47,14 +47,26 @@ PROVIDERS: dict[str, dict] = {
         "model": "wanx2.1-t2i-plus",
         "size": "1440*810",
         "key_attr": "llm_api_key",
+        "price_cny": 0.20,     # 元/张（官方刊例价），可用 WANX_IMAGE_PRICE 覆盖
     },
     "seedream": {
         "label": "Seedream 即梦",
         "model": "doubao-seedream-3-0-t2i-250415",
         "size": "2048x1152",
         "key_attr": "ark_api_key",
+        "price_cny": 0.259,
     },
 }
+
+
+def price(key: str | None = None) -> float:
+    """单张出图费用（元）。V1.0 出图不记费用，导致成本统计与每日上限都漏掉生图。"""
+    key = key or default_provider()
+    env = os.environ.get(f"{key.upper()}_IMAGE_PRICE", "").strip()
+    try:
+        return float(env) if env else float(_cfg(key)["price_cny"])
+    except ValueError:
+        return float(_cfg(key)["price_cny"])
 
 
 def _cfg(key: str) -> dict:
@@ -111,11 +123,14 @@ def list_providers() -> list[dict]:
 def text_to_image(prompt: str, out_path: str | Path, *,
                   provider: str | None = None, size: str | None = None,
                   negative: str = DEFAULT_NEGATIVE,
-                  timeout_s: int = POLL_MAX_S, attempts: int = 3) -> Path:
+                  timeout_s: int = POLL_MAX_S, attempts: int = 3,
+                  project_id: str = "") -> Path:
     """生成一张图并保存到 out_path。失败抛 RuntimeError（带上游原文，便于定位）。
 
     `prompt` 传「画面内容」，写实风格后缀由本函数自动补 —— 调用方不用操心。
     """
+    from ..observability import record
+
     key = provider or default_provider()
     if not available(key):
         env = "LLM_API_KEY" if key == "wanx" else "ARK_API_KEY"
@@ -128,11 +143,16 @@ def text_to_image(prompt: str, out_path: str | Path, *,
 
     last: Exception | None = None
     for k in range(max(1, attempts)):
+        t0 = time.time()
         try:
             if key == "seedream":
                 _seedream(full, out_path, size=size, timeout_s=timeout_s)
             else:
                 _wanx(full, out_path, size=size, negative=negative, timeout_s=timeout_s)
+            # 只有成功出图才计费（失败的任务上游不收费）
+            record(kind="image", provider=key, model=model_name(key), purpose="text_to_image",
+                   params={"size": size}, status="ok", elapsed_s=time.time() - t0,
+                   cost=price(key), project_id=project_id)
             return out_path
         except Exception as e:  # noqa: BLE001
             last = e

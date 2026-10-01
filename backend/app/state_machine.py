@@ -18,7 +18,8 @@ class StateSpec:
 
 
 STATES: dict[str, StateSpec] = {
-    "briefing": StateSpec("briefing", "简报中", "创作简报", "lyric_generating", False, "创作简报待确认"),
+    # 确认简报也是人工节点（PRD V1.1 §4.2）：V1.0 标成非人工，看板「待人工处理」就漏算了它
+    "briefing": StateSpec("briefing", "简报中", "创作简报", "lyric_generating", True, "创作简报待确认"),
     "lyric_generating": StateSpec("lyric_generating", "写词中", "词曲生成", "lyric_review", False, "LLM 生成歌词与自动检查"),
     "lyric_review": StateSpec("lyric_review", "待确认歌词", "词曲生成", "music_generating", True, "等待人工确认歌词"),
     "music_generating": StateSpec("music_generating", "生曲中", "词曲生成", "music_review", False, "多模型并行生成候选"),
@@ -47,7 +48,8 @@ REJECT_TARGETS: dict[str, list[str]] = {
 
 # 待办类型标签（看板 F1-5）
 TODO_TYPE: dict[str, str] = {
-    "lyric_review": "史实",
+    "briefing": "简报",
+    "lyric_review": "歌词",
     "music_review": "选曲",
     "storyboard_review": "配图",
     "edit_review": "精剪",

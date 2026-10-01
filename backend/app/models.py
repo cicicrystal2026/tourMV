@@ -59,6 +59,10 @@ class Project(IdMixin, TimestampMixin, Base):
     status_note: Mapped[str] = mapped_column(String(300), default="")
     # 驳回/返工一次记一笔，用于复盘
     reject_count: Mapped[int] = mapped_column(Integer, default=0)
+    # PRD V1.1 §4.2 已交付锁定：非空即只读，要改只能「新建修订版」
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 修订版指向的原项目
+    parent_project_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class Brief(IdMixin, TimestampMixin, Base):
@@ -86,6 +90,9 @@ class LyricVersion(IdMixin, TimestampMixin, Base):
     # [{name: "主歌1", lines: ["..."]}]
     sections: Mapped[list] = mapped_column(JSON, default=list)
     source: Mapped[str] = mapped_column(String(20), default="ai")  # ai / manual
+    # 自动检查是否已跑完。没有这个标记时，「还没检查」和「检查后零疑点」在数据上
+    # 无法区分，前端就会在检查跑完之前显示「全部通过」（V1.0 现网的真实缺陷）。
+    checks_done: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class LyricCheck(IdMixin, TimestampMixin, Base):
@@ -99,9 +106,13 @@ class LyricCheck(IdMixin, TimestampMixin, Base):
     line_no: Mapped[int] = mapped_column(Integer, default=0)
     section: Mapped[str] = mapped_column(String(60), default="")
     text: Mapped[str] = mapped_column(Text, default="")
-    status: Mapped[str] = mapped_column(String(20), default="pending")  # pass/pending/resolved
+    # pending / adopted / kept（保留原文，须有理由）；resolved 为 V1.0 历史值，等同 kept
+    status: Mapped[str] = mapped_column(String(20), default="pending")
     evidence: Mapped[str] = mapped_column(Text, default="")
     suggestions: Mapped[list] = mapped_column(JSON, default=list)
+    keep_reason: Mapped[str] = mapped_column(Text, default="")
+    # 史实疑点没有可追溯出处时为 True（知识库上线前所有史实疑点都是这种）
+    needs_manual: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 # --------------------------------------------------------------------- 音乐
@@ -124,6 +135,24 @@ class MusicModel(IdMixin, TimestampMixin, Base):
         return round(self.score_sum / self.score_n, 2) if self.score_n else 0.0
 
 
+class MusicRound(IdMixin, TimestampMixin, Base):
+    """生曲轮次（PRD V1.1 D2）。
+
+    production：日常出片，可反复追加候选，显示模型名，**不计入模型战绩**；
+    selection ：选型轮，参赛模型并行各出 N 版，强制盲听，选定后揭晓并计入战绩。
+    """
+
+    __tablename__ = "music_round"
+
+    project_id: Mapped[str] = mapped_column(String(36), ForeignKey("project.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(20), default="production")
+    round_no: Mapped[int] = mapped_column(Integer, default=1)        # 项目内序号
+    selection_no: Mapped[int] = mapped_column(Integer, default=0)    # 全局选型轮序号（仅 selection）
+    model_keys: Mapped[list] = mapped_column(JSON, default=list)
+    variants: Mapped[int] = mapped_column(Integer, default=1)
+    winner_candidate_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
 class MusicCandidate(IdMixin, TimestampMixin, Base):
     __tablename__ = "music_candidate"
 
@@ -144,6 +173,11 @@ class MusicCandidate(IdMixin, TimestampMixin, Base):
     elapsed_s: Mapped[float] = mapped_column(Float, default=0.0)
     error: Mapped[str] = mapped_column(Text, default="")
     model_name: Mapped[str] = mapped_column(String(120), default="")
+    round_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # 占位结果（模型未配置时由 mock 适配器产出）：不打匹配分、不可选定交付、不进统计
+    is_mock: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 对外的音频地址只用随机 token，文件名里的模型 / mock 字样不外泄（盲听约束）
+    audio_token: Mapped[str] = mapped_column(String(40), default="", index=True)
 
 
 class Rating(IdMixin, TimestampMixin, Base):
@@ -186,6 +220,10 @@ class Asset(IdMixin, TimestampMixin, Base):
     usable: Mapped[bool] = mapped_column(Boolean, default=True)
     tag_confidence: Mapped[float] = mapped_column(Float, default=1.0)
     embedding: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # PRD V1.1 F4-10：来源 shot（实拍）/ ai（AI 生成）。AI 素材不计入「已授权」
+    source: Mapped[str] = mapped_column(String(10), default="shot")
+    # 种子演示数据（占位镜头与虚构授权），补登真实授权前不得进入样片
+    is_seed: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 # ------------------------------------------------------- 逐句分镜（配图审核）
@@ -344,6 +382,8 @@ class TrendCard(IdMixin, TimestampMixin, Base):
     remix: Mapped[dict] = mapped_column(JSON, default=dict)  # borrowable/style_prompt/...
     metrics: Mapped[dict] = mapped_column(JSON, default=dict)
     analyzed_at: Mapped[str] = mapped_column(String(40), default="")
+    # 演示卡（monitor 未接入时的示例数据），不应出现在生产选项里
+    is_seed: Mapped[bool] = mapped_column(Boolean, default=False)
 
     @property
     def style_prompt(self) -> str:

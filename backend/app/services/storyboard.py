@@ -137,7 +137,8 @@ def _asset_for_shot(db: Session, row: StoryboardShot, p: Project, *, img: Path,
     a.destination = p.destination or ""
     a.duration_s = round(float(media.probe(clip).get("duration_s") or CLIP_SECONDS), 2)
     a.width, a.height, a.fps = 1920, 1080, 25.0
-    a.license_status = "licensed"
+    a.source = "ai"
+    a.license_status = "ai_generated"
     a.licensor = "AI 生成（通义万相）" if provider == "wanx" else "AI 生成（Seedream）"
     a.license_no = f"AI-SB-{date.today().strftime('%Y%m%d')}"
     a.scope = "线上投放（含海外平台）"
@@ -174,7 +175,7 @@ def _render_one(row: StoryboardShot, p: Project, provider: str
     prompt = (row.prompt or "").strip() or f"{row.place}，{p.destination or ''}，标志性景观"
     note = ""
     try:
-        image_ad.text_to_image(prompt, raw, provider=provider)
+        image_ad.text_to_image(prompt, raw, provider=provider, project_id=p.id)
     except RuntimeError as e:
         # 上游的内容合规检查会拦掉部分专有名词（实测「天安门城楼」被挡，
         # 报 DataInspectionFailed）。画面描述本身没问题，把地名换成中性说法再试一次
@@ -185,7 +186,7 @@ def _render_one(row: StoryboardShot, p: Project, provider: str
             p.destination or "\x00", "此地")
         if softened == prompt:
             raise
-        image_ad.text_to_image(softened, raw, provider=provider)
+        image_ad.text_to_image(softened, raw, provider=provider, project_id=p.id)
         note = (f"上游合规检查拦截了「{row.place}」，已自动改用中性描述出图；"
                 "如需精确实景建议上传自有图")[:300]
     if not media.is_valid_image(raw):
@@ -355,6 +356,9 @@ def upload(db: Session, shot_id: str, filename: str, content: bytes) -> dict:
     row.image_path, row.clip_path = str(img), str(clip)
     row.provider, row.model = "upload", filename[:80]
     a = _asset_for_shot(db, row, p, img=img, clip=clip, thumb=thumb, provider="upload")
+    # 用户上传的是自有/已授权实拍图，来源记为实拍；授权细节在素材库补登
+    a.source = "shot"
+    a.license_status = "licensed"
     a.licensor = "用户上传"
     a.license_no = "UPLOAD"
     row.asset_id = a.id
