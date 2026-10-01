@@ -52,8 +52,14 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
         ...init,
       })
     } catch (e) {
-      // 网络层错误：连接重置 / 超时 / 边缘层没吐出响应
-      lastError = e instanceof Error ? e : new Error(String(e))
+      // 网络层错误：连接重置 / 超时 / 边缘层没吐出响应。
+      // 浏览器原文是「Failed to fetch」，用户看不懂，换成能指导下一步的说法
+      const aborted = e instanceof DOMException && e.name === 'AbortError'
+      lastError = new Error(
+        aborted
+          ? '请求超时：后端响应太慢，页面会自动重试，也可以稍后刷新'
+          : '连不上后端服务：可能服务未启动、正在重启或网络中断。恢复后页面会自动刷新',
+      )
       continue
     }
 
