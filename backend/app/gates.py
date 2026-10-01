@@ -90,6 +90,11 @@ def check(db: Session, p: Project) -> Gate:
             g.fail("还没有逐句配图")
         elif not prog["all_approved"]:
             g.fail(f"还有 {prog['total'] - prog['approved']} 句配图未通过审核")
+        if not settings().allow_mock:
+            fake = [r.order for r in storyboard_svc.shots(db, p.id)
+                    if r.provider in ("placeholder", "library_seed")]
+            if fake:
+                g.fail(f"第 {'、'.join(map(str, fake[:8]))} 句用的是占位 / 演示画面，生产环境不能进入卡点")
 
     elif st == "edit_review":
         from .models import Timeline, TimelineClip

@@ -54,9 +54,10 @@ export default function StoryboardPage() {
   const providers: any[] = data?.providers || []
 
   // 有句子还在排队/出图中就自动轮询 —— 出图是长任务，用户不该手动刷新
+  // 只有真有出图任务在跑才算「出图中」（V1.0 把「待生成」也算进来，没配生图模型时永远显示出图中）
   const working = useMemo(
-    () => items.some((x) => x.status === 'draft' || x.status === 'generating'),
-    [items],
+    () => !!data?.job_active || items.some((x) => x.status === 'generating'),
+    [data, items],
   )
   useEffect(() => {
     if (!projectId || !working) return
@@ -163,20 +164,23 @@ export default function StoryboardPage() {
             </button>
             <button
               className="btn-primary"
-              disabled={!!busy || !providers.some((x) => x.key === provider && x.ready)}
+              disabled={!!busy || working}
               title={
+                // 不再要求生图模型就绪：先在素材库找实拍镜头，找不到才用 AI 补位（PRD V1.1 D1）
                 providers.some((x) => x.key === provider && x.ready)
-                  ? ''
-                  : '所选生图模型未配置（缺 Key），请在 .env 里补上'
+                  ? '先从素材库匹配实拍镜头，匹配不到的句子再用所选模型生成'
+                  : data?.allow_mock
+                    ? '生图模型未配置：先从素材库匹配，匹配不到的句子生成占位画面（演示模式）'
+                    : '生图模型未配置：只从素材库匹配实拍镜头，匹配不到的句子会标为缺镜头'
               }
               onClick={() =>
                 act('enqueue', () => api.storyboardEnqueue(projectId!, provider), () => {
-                  setMsg('已入队：逐句出图进行中，页面会自动刷新')
+                  setMsg('已开始：先从素材库匹配实拍镜头，匹配不到的再 AI 补位，页面会自动刷新')
                   load(projectId!)
                 })
               }
             >
-              {busy === 'enqueue' ? '提交中…' : '开始/继续出图'}
+              {busy === 'enqueue' ? '提交中…' : working ? '匹配/出图中…' : '开始匹配镜头'}
             </button>
             <button
               className="btn"
@@ -406,6 +410,21 @@ function ShotCard({
         </span>
         <span className="text-[11px] text-ink-faint truncate">{shot.section}</span>
         {shot.rev > 0 && <span className="text-[10px] text-ink-faint shrink-0">第{shot.rev + 1}版</span>}
+        {/* 镜头来源：实拍 / AI / 占位一眼可辨（PRD V1.1 §10.3 来源标签） */}
+        {shot.source_label && (
+          <span
+            className={clsx(
+              'ml-auto shrink-0 text-[10px] px-1.5 py-0.5 rounded',
+              shot.source === 'library' || shot.source === 'upload'
+                ? 'bg-brand text-white'
+                : shot.source === 'placeholder' || shot.source === 'library_seed'
+                  ? 'bg-page text-ink-faint border border-line'
+                  : 'border border-human text-human-dark',
+            )}
+          >
+            {shot.source_label}
+          </span>
+        )}
       </div>
 
       <div className="relative bg-page aspect-video">

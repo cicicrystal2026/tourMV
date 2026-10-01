@@ -201,18 +201,113 @@ def _render_one(row: StoryboardShot, p: Project, provider: str
     return img, clip, thumb, note
 
 
+# ------------------------------------------------------------------ 镜头来源兜底链
+# PRD V1.1 D1「实拍优先、AI 补位」。每句按顺序尝试，命中即停：
+#   1. library     素材库实拍镜头（同目的地 + 关键词匹配，一支片内不重复用）
+#   2. library_ai  素材库里已有的同目的地 AI 画面（复用，不再花钱）
+#   3. wanx / seedream  新生成 AI 画面（按张计费，需凭证）
+#   4. placeholder 占位画面 —— 仅演示模式（ALLOW_MOCK / FORCE_MOCK）；生产环境闸门不放行
+# V1.0 只有第 3 步，生图模型没配好整页就卡在「待生成」。
+SOURCE_LABEL = {
+    "library": "素材库实拍", "library_ai": "复用素材库 AI 画面", "library_seed": "演示素材（非实拍）",
+    "wanx": "AI 生成·通义万相", "seedream": "AI 生成·Seedream",
+    "placeholder": "占位画面（演示模式）", "upload": "用户上传",
+}
+
+
+def _dest_core(destination: str) -> str:
+    """「吉林·长白山」→「长白山」：素材库里目的地写法不统一，按核心地名匹配。"""
+    return (destination or "").replace("•", "·").split("·")[-1].strip()
+
+
+def _tokens(row: StoryboardShot) -> list[str]:
+    toks = [k.strip() for k in (row.keywords or "").split(",") if k.strip()]
+    place = (row.place or "").replace("•", "·")
+    toks += [t for t in place.replace("的", "·").split("·") if len(t.strip()) >= 2]
+    return list(dict.fromkeys(toks))
+
+
+def _library_pick(db: Session, p: Project, row: StoryboardShot, used: set[str],
+                  tier: str) -> Asset | None:
+    """在素材库里给这句找一个镜头。tier: shot（实拍）/ ai（已有 AI 画面）/ seed（演示素材）。"""
+    from .assets import tag_map
+
+    core = _dest_core(p.destination)
+    if not core:
+        return None
+    cands = []
+    for a in db.execute(select(Asset).where(Asset.usable.is_(True))).scalars():
+        if a.id in used or a.license_status == "missing":
+            continue
+        if a.has_portrait and not (a.portrait or "").strip():
+            continue      # 肖像权未登记不进候选（PRD F4 交互规则）
+        kind = "ai" if a.source == "ai" else ("seed" if a.is_seed else "shot")
+        if kind != tier:
+            continue
+        if core not in (a.destination or "") and core not in (a.name or ""):
+            continue
+        cands.append(a)
+    if not cands:
+        return None
+    tags = tag_map(db, [a.id for a in cands])
+    toks = _tokens(row)
+
+    def score(a: Asset) -> int:
+        text = (a.name or "") + " " + " ".join(v for vs in tags.get(a.id, {}).values() for v in vs)
+        return sum(1 for t in toks if t and t in text)
+
+    return max(cands, key=score)
+
+
+def _use_library(db: Session, row: StoryboardShot, a: Asset, source: str) -> None:
+    """把素材库镜头挂到这句上：抽一帧做审核图，片段直接复用原素材（不复制、不新建资产）。"""
+    img, _clip, thumb = _image_paths(row)
+    img.parent.mkdir(parents=True, exist_ok=True)
+    src = Path(a.file_path or "")
+    if src.exists():
+        media.make_thumb(src, img, at_s=min(2.0, max(0.5, (a.duration_s or 4) / 3)))
+    elif a.thumb_path and Path(a.thumb_path).exists():
+        img.write_bytes(Path(a.thumb_path).read_bytes())
+    if img.exists():
+        media.make_thumb_from_image(img, thumb)
+        row.image_path = str(img)
+    row.clip_path = a.file_path
+    row.asset_id = a.id
+    row.provider, row.model = source, a.name[:80]
+    row.note = f"{SOURCE_LABEL[source]}：{a.name}（{a.licensor or '未登记授权方'}）"[:300]
+    row.error = ""
+    row.status = "pending"
+
+
+def _placeholder(db: Session, row: StoryboardShot, p: Project) -> None:
+    """演示模式的最后兜底：带地名字样的占位画面，界面明确标注，生产环境闸门不放行。"""
+    img, clip, thumb = _image_paths(row)
+    media.generate_test_clip(clip, seconds=8.0, label=f"{row.place} · 占位")
+    media.make_thumb(clip, img, at_s=1.0)
+    media.make_thumb_from_image(img, thumb)
+    row.image_path, row.clip_path = str(img), str(clip)
+    a = _asset_for_shot(db, row, p, img=img, clip=clip, thumb=thumb, provider="placeholder")
+    a.source, a.is_seed = "shot", True
+    a.license_status, a.licensor, a.license_no = "licensed", "占位画面（演示模式，非真实）", "PLACEHOLDER"
+    row.asset_id = a.id
+    row.provider, row.model = "placeholder", "ffmpeg"
+    row.note = "素材库无匹配镜头、生图模型未配置：已生成占位画面（仅演示模式可用）"
+    row.error = ""
+    row.status = "pending"
+
+
 def generate(db: Session, project_id: str, *, shot_ids: list[str] | None = None,
              provider: str | None = None, force: bool = False,
              on_progress=None) -> dict:
-    """并发出图 + 转片段 + 登记资产。返回统计。
+    """按兜底链为每句配镜头（素材库实拍 → 复用 AI → 新生成 AI → 占位），返回统计。
 
     默认只补「还没有图」和「被驳回」的，已有待审图的不会重复花钱；
     要整批重做传 `force=True`。
     """
     p = get_project(db, project_id)
     provider = (provider or image_ad.default_provider()).strip().lower()
-    if not image_ad.available(provider):
-        raise ProjectError(f"{provider} 未就绪：{image_ad.note(provider)}")
+    ai_ready = image_ad.available(provider)
+    allow_mock = settings().allow_mock
 
     rows = shots(db, project_id)
     if not rows:
@@ -231,8 +326,48 @@ def generate(db: Session, project_id: str, *, shot_ids: list[str] | None = None,
         r.error = ""
     db.commit()
 
+    # 1–2) 素材库检索（同一支片内不重复用同一个镜头，PRD F6-6）
+    todo_ids = {r.id for r in todo}
+    used = {r.asset_id for r in shots(db, project_id)
+            if r.asset_id and r.id not in todo_ids and r.status != "rejected"}
+    tiers = ["shot", "ai"] + (["seed"] if allow_mock else [])
+    by_source: dict[str, int] = {}
+    need_ai: list[StoryboardShot] = []
+    for r in todo:
+        hit = None
+        for tier in tiers:
+            hit = _library_pick(db, p, r, used, tier)
+            if hit is not None:
+                src = {"shot": "library", "ai": "library_ai", "seed": "library_seed"}[tier]
+                _use_library(db, r, hit, src)
+                used.add(hit.id)
+                by_source[src] = by_source.get(src, 0) + 1
+                break
+        if hit is None:
+            need_ai.append(r)
+    db.commit()
+
+    ok = sum(by_source.values())
+    errors: list[dict] = []
+    if need_ai and not ai_ready:
+        # 4) 没有生图能力：演示模式出占位，生产环境如实报「缺镜头」
+        for r in need_ai:
+            if allow_mock:
+                _placeholder(db, r, p)
+                by_source["placeholder"] = by_source.get("placeholder", 0) + 1
+                ok += 1
+            else:
+                r.status = "rejected"
+                r.error = (f"素材库没有「{_dest_core(p.destination)}」的可用实拍镜头，"
+                           f"且生图模型未就绪（{image_ad.note(provider)}）。请上传素材或配置生图模型")
+                errors.append({"order": r.order, "place": r.place, "error": r.error})
+        db.commit()
+        need_ai = []
+    if on_progress and not need_ai:
+        on_progress(len(todo), len(todo))
+    todo = need_ai
+
     workers = max(1, min(6, settings().image_concurrency))
-    ok, errors = 0, []
 
     def work(row: StoryboardShot):
         try:
@@ -264,14 +399,18 @@ def generate(db: Session, project_id: str, *, shot_ids: list[str] | None = None,
                 row.asset_id = a.id
                 row.status = "pending"
                 ok += 1
+                by_source[provider] = by_source.get(provider, 0) + 1
             db.commit()
             if on_progress:
                 on_progress(n, len(todo))
 
+    total = ok + len(errors)
+    parts = "，".join(f"{SOURCE_LABEL.get(k, k)} {v}" for k, v in by_source.items())
     return {
-        "ok": ok, "failed": len(errors), "total": len(todo), "errors": errors,
+        "ok": ok, "failed": len(errors), "total": total, "errors": errors,
+        "by_source": by_source,
         "provider": provider, "model": image_ad.model_name(provider),
-        "note": f"共 {len(todo)} 张：成功 {ok}，失败 {len(errors)}",
+        "note": f"共 {total} 句：{parts or '无'}" + (f"；失败 {len(errors)}" if errors else ""),
     }
 
 
@@ -306,7 +445,14 @@ def regenerate(db: Session, shot_id: str, *, prompt: str | None = None,
         raise ProjectError("分镜不存在")
     p = get_project(db, row.project_id)
     provider = (provider or row.provider or image_ad.default_provider()).strip().lower()
+    if provider not in image_ad.PROVIDERS:
+        provider = image_ad.default_provider()     # 上一版来自素材库/占位时，重出走默认生图模型
     if not image_ad.available(provider):
+        if settings().allow_mock:
+            row.rev += 1
+            _placeholder(db, row, p)
+            db.commit()
+            return {"id": row.id, "status": row.status, "rev": row.rev, "image_url": _img_url(row)}
         raise ProjectError(f"{provider} 未就绪：{image_ad.note(provider)}")
     if prompt is not None and prompt.strip():
         row.prompt = prompt.strip()[:1500]
@@ -389,7 +535,9 @@ def _img_url(row: StoryboardShot) -> str:
 
 def _clip_url(row: StoryboardShot) -> str:
     from ..serialize import media_url
-    # 片段落在 data/assets/storyboard/，由已有的 /media/assets 挂载点提供
+    # 素材库镜头直接复用原文件（data/assets/）；生成的片段落在 data/assets/storyboard/
+    if (row.provider or "").startswith("library"):
+        return media_url("assets", row.clip_path)
     return media_url("assets/storyboard", row.clip_path)
 
 
@@ -443,11 +591,22 @@ def payload(db: Session, project_id: str) -> dict:
             "clip_url": _clip_url(r) if r.clip_path else "",
             "thumb_url": _thumb_url(r), "asset_id": r.asset_id,
             "rev": r.rev, "note": r.note, "error": r.error,
+            "source": r.provider, "source_label": SOURCE_LABEL.get(r.provider or "", ""),
             "updated_at": r.updated_at,
         })
+    from ..models import Job
+
+    # 真有出图任务在排队/运行时才算「出图中」。V1.0 把「待生成」也当成出图中，
+    # 生图模型没配好时页面永远显示「出图中，自动刷新…」
+    job_active = db.execute(select(Job).where(
+        Job.project_id == project_id,
+        Job.type.in_(("storyboard_generate", "storyboard_generate_one")),
+        Job.status.in_(("queued", "running")))).first() is not None
     return {"items": items, "progress": progress(db, project_id),
             "providers": image_ad.list_providers(),
-            "provider": image_ad.default_provider()}
+            "provider": image_ad.default_provider(),
+            "job_active": job_active,
+            "allow_mock": settings().allow_mock}
 
 
 def approved_map(db: Session, project_id: str) -> dict[int, str]:

@@ -275,3 +275,52 @@ def test_dashboard_timestamps_have_timezone(client):
     stamps = [it["updated_at"] for col in d["columns"] for it in col["items"]]
     assert stamps and all(("+00:00" in t) or t.endswith("Z") for t in stamps)
     dt.datetime.fromisoformat(stamps[0])
+
+
+# ------------------------------------------------------------------ 配图兜底链（实拍优先、AI 补位）
+def test_storyboard_fallback_chain(client, has_real_db):
+    if not has_real_db:
+        pytest.skip("没有真实库备份")
+    from app.db import SessionLocal
+    from app.models import StoryboardShot
+
+    # 演示模式 + 生图模型未就绪：素材库先匹配，匹配不到的出占位，不能卡在「待生成」
+    r = client.post(f"/api/projects/{CHANGBAI}/storyboard/plan?force=true")
+    assert r.status_code == 200, r.text
+    r = client.post(f"/api/projects/{CHANGBAI}/storyboard/generate")
+    assert r.status_code == 200, r.text
+    res = r.json()
+    assert res["failed"] == 0 and res["ok"] == res["total"] > 0
+    assert res["by_source"].get("library_seed", 0) >= 1, "长白山的演示素材应先被素材库匹配到"
+    sb = client.get(f"/api/projects/{CHANGBAI}/storyboard").json()
+    assert all(it["image_url"] and it["status"] == "pending" for it in sb["items"])
+    lib = [it["asset_id"] for it in sb["items"] if it["source"].startswith("library")]
+    assert len(lib) == len(set(lib)), "一支片内同一个素材库镜头不能重复用"
+    assert not sb["job_active"]
+
+    # 生产环境（禁用占位）：素材库没有实拍时如实标「缺镜头」，不出占位；占位画面过不了闸门
+    s = _settings()
+    old = s.allow_mock
+    s.allow_mock = False
+    try:
+        with SessionLocal() as db:
+            for row in db.query(StoryboardShot).filter(StoryboardShot.project_id == CHANGBAI):
+                row.status = "approved"
+            db.commit()
+        from app.gates import check
+        from app.models import Project
+        with SessionLocal() as db:
+            p = db.get(Project, CHANGBAI)
+            p.status = "storyboard_review"
+            db.commit()
+            g = check(db, p)
+        assert not g.ok and any("占位" in x for x in g.reasons)
+
+        r = client.post(f"/api/projects/{CHANGBAI}/storyboard/plan?force=true")
+        r = client.post(f"/api/projects/{CHANGBAI}/storyboard/generate")
+        assert r.status_code == 200, r.text
+        res = r.json()
+        assert "placeholder" not in res["by_source"] and "library_seed" not in res["by_source"]
+        assert res["failed"] >= 1 and "素材库没有" in res["errors"][0]["error"]
+    finally:
+        s.allow_mock = old
