@@ -7,6 +7,7 @@ import LyricsPage from './pages/Lyrics'
 import EditPage from './pages/Edit'
 import AssetsPage from './pages/Assets'
 import StoryboardPage from './pages/Storyboard'
+import KnowledgeBase from './pages/KnowledgeBase'
 import api from './lib/api'
 
 /** 本地开发（没启后端基本就是自己忘了）与线上（多为网络抖动）要给出完全不同的提示 */
@@ -160,6 +161,7 @@ function Shell() {
           <Route path="/storyboard" element={<StoryboardPage />} />
           <Route path="/edit" element={<EditPage />} />
           <Route path="/assets" element={<AssetsPage />} />
+          <Route path="/kb" element={<KnowledgeBase />} />
         </Routes>
       </main>
     </div>

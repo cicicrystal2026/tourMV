@@ -279,6 +279,23 @@ export const api = {
     return res.json()
   },
 
+  // 文化知识库（PRD V1.1 §6.7）
+  kbList: (params: { destination?: string; q?: string; verified?: boolean } = {}) => {
+    const sp = new URLSearchParams()
+    if (params.destination) sp.set('destination', params.destination)
+    if (params.q) sp.set('q', params.q)
+    if (params.verified !== undefined) sp.set('verified', String(params.verified))
+    const qs = sp.toString()
+    return get(`/api/kb${qs ? `?${qs}` : ''}`)
+  },
+  kbCoverage: (destination: string) => get(`/api/kb/coverage?destination=${encodeURIComponent(destination)}`),
+  kbCreate: (body: Json) => post('/api/kb', body),
+  kbUpdate: (id: string, body: Json) => put(`/api/kb/${id}`, body),
+  kbVerify: (id: string, body: Json) => post(`/api/kb/${id}/verify`, body),
+  kbDelete: (id: string) => del(`/api/kb/${id}`),
+  kbDraft: (destination: string, count = 8) => post('/api/kb/draft', { destination, count }),
+  kbFromCheck: (checkId: string, body: Json) => post(`/api/kb/from-check/${checkId}`, body),
+
   // 热歌
   trendCards: (week?: string) => get(`/api/trends/cards${week ? `?week=${week}` : ''}`),
   trendsStatus: () => get('/api/trends/status'),

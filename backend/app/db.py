@@ -83,7 +83,8 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     # ---- PRD V1.1 ----
     "project": {"locked_at": "DATETIME", "parent_project_id": "VARCHAR(36)"},
     "lyric_version": {"checks_done": "BOOLEAN DEFAULT 0"},
-    "lyric_check": {"keep_reason": "TEXT DEFAULT ''", "needs_manual": "BOOLEAN DEFAULT 0"},
+    "lyric_check": {"keep_reason": "TEXT DEFAULT ''", "needs_manual": "BOOLEAN DEFAULT 0",
+                    "kb_entry_ids": "JSON"},
     "music_candidate": {"round_id": "VARCHAR(36)", "is_mock": "BOOLEAN DEFAULT 0",
                         "audio_token": "VARCHAR(40) DEFAULT ''"},
     "asset": {"source": "VARCHAR(10) DEFAULT 'shot'", "is_seed": "BOOLEAN DEFAULT 0"},

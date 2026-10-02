@@ -66,11 +66,14 @@ def generate(db: Session, project_id: str) -> tuple[LyricVersion, bool]:
     mood = (brief.mood if brief else []) or []
     style = (brief.style_prompt if brief else "") or ""
 
+    from . import kb as kb_svc
+
+    kb_text, kb_ids = kb_svc.context_block(db, p.destination, " ".join(mood) + (brief.genre if brief else ""))
     payload, real = llm.json_chat(
         prompts.lyrics_messages(
             p.destination, brief.genre if brief else "", mood,
             brief.duration_s if brief else 180, style,
-            brief.forbidden if brief else "",
+            brief.forbidden if brief else "", kb_text=kb_text,
         ),
         fallback=prompts.lyrics_fallback(p.destination, mood),
         purpose="lyrics_generate", project_id=p.id,
@@ -80,6 +83,8 @@ def generate(db: Session, project_id: str) -> tuple[LyricVersion, bool]:
         raise ProjectError("LLM 调用失败，未生成歌词（生产环境不使用模板占位歌词），请稍后重试")
     sections = payload.get("sections") or prompts.lyrics_fallback(p.destination, mood)["sections"]
 
+    if brief is not None:
+        brief.kb_refs = kb_ids      # 记录这一版写词引用了哪些已核实条目
     prev = latest(db, p.id)
     ver = LyricVersion(project_id=p.id, version=(prev.version + 1) if prev else 1,
                        sections=sections, source="ai", checks_done=False)
@@ -141,9 +146,14 @@ def run_checks(db: Session, ver: LyricVersion, real: bool = True) -> list[LyricC
                            "text": it["text"], "evidence": f"当前 {n} 字，要求 {MIN_LEN}-{MAX_LEN} 字（不计标点）",
                            "suggestions": _filter(fixes.get(it["id"], []), it["text"])})
 
-    # 2) 押韵 + 史实：LLM，失败时退回规则兜底（只标疑点、不给建议）
+    # 2) 押韵 + 史实：LLM（带已核实知识库），失败时退回规则兜底（只标疑点、不给建议）
+    from . import kb as kb_svc
+    from ..models import KbEntry
+
+    body = " ".join(ln for _n, _i, ln in flat_lines(ver.sections))
+    kb_text, kb_ids = kb_svc.context_block(db, destination, body, limit=15)
     payload, _used = llm.json_chat(
-        prompts.check_messages(ver.sections, destination),
+        prompts.check_messages(ver.sections, destination, kb_text=kb_text),
         fallback=prompts.check_fallback(ver.sections, destination),
         purpose="lyrics_check", project_id=ver.project_id,
     )
@@ -154,8 +164,16 @@ def run_checks(db: Session, ver: LyricVersion, real: bool = True) -> list[LyricC
         actual = lines.get(key)
         if actual is None:
             continue      # 行号对不上的直接丢弃（V1.0 出现过同一行号挂两条不同原句）
+        cited = []
+        for n in it.get("kb") or []:
+            try:
+                idx = int(str(n).strip("[] ")) - 1
+            except ValueError:
+                continue
+            if 0 <= idx < len(kb_ids) and kb_ids[idx] not in cited:
+                cited.append(kb_ids[idx])
         issues.append({"type": it["type"], "section": key[0], "line_no": key[1], "text": actual,
-                       "evidence": str(it.get("evidence") or ""),
+                       "evidence": str(it.get("evidence") or ""), "kb": cited,
                        "suggestions": _filter(it.get("suggestions") or [], actual)})
 
     # 同一行同一类型只留一条
@@ -172,14 +190,20 @@ def run_checks(db: Session, ver: LyricVersion, real: bool = True) -> list[LyricC
     for it in uniq:
         is_fact = it["type"] == "fact"
         evidence = it["evidence"]
-        if is_fact:
-            # 知识库上线（W3）前没有可追溯出处：只提示「需人工核实」，不当结论用
-            evidence = f"【需人工核实·暂无知识库出处】{evidence}"
+        cited = it.get("kb") or []
+        if is_fact and cited:
+            # 有已核实条目作依据：写明出处，不再标「需人工核实」
+            refs = [db.get(KbEntry, k) for k in cited]
+            src = "；".join(f"《{r.title}》（{r.source_name}）" for r in refs if r)
+            evidence = f"据知识库 {src}：{evidence}"
+        elif is_fact:
+            # 知识库里没有覆盖的内容：只提示「需人工核实」，不当结论用
+            evidence = f"【需人工核实·知识库无出处】{evidence}"
         row = LyricCheck(
             lyric_version_id=ver.id, project_id=ver.project_id,
             type=it["type"], line_no=it["line_no"], section=it["section"], text=it["text"],
             status="pending", evidence=evidence, suggestions=it["suggestions"],
-            needs_manual=is_fact,
+            needs_manual=is_fact and not cited, kb_entry_ids=cited,
         )
         db.add(row)
         rows.append(row)

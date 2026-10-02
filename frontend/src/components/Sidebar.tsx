@@ -4,9 +4,10 @@ import clsx from 'clsx'
 const NAV = [
   { to: '/dashboard', label: '生产看板', hint: '项目全景与待办' },
   { to: '/lyrics', label: '词曲工作台', hint: '写词 · 生曲 · 选曲' },
-  { to: '/storyboard', label: '配图审核', hint: '逐句景区图 · 审核替换' },
+  { to: '/storyboard', label: '镜头确认', hint: '逐句景区图 · 审核替换' },
   { to: '/edit', label: '剪辑工作台', hint: '粗剪 · 精剪 · 导出' },
   { to: '/assets', label: '素材库管理', hint: '上传 · 打标 · 检索' },
+  { to: '/kb', label: '文化知识库', hint: '核实条目 · 史实出处' },
 ]
 
 const PLACEHOLDER = [

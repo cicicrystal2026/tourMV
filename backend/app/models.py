@@ -113,6 +113,8 @@ class LyricCheck(IdMixin, TimestampMixin, Base):
     keep_reason: Mapped[str] = mapped_column(Text, default="")
     # 史实疑点没有可追溯出处时为 True（知识库上线前所有史实疑点都是这种）
     needs_manual: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 引用的知识库条目（只引用已核实条目）
+    kb_entry_ids: Mapped[list] = mapped_column(JSON, default=list)
 
 
 # --------------------------------------------------------------------- 音乐
@@ -411,6 +413,28 @@ class PublishMetric(IdMixin, TimestampMixin, Base):
     completion: Mapped[float] = mapped_column(Float, default=0.0)
     engagement: Mapped[float] = mapped_column(Float, default=0.0)
     note: Mapped[str] = mapped_column(Text, default="")
+
+
+# --------------------------------------------------------------------- 文化知识库
+class KbEntry(IdMixin, TimestampMixin, Base):
+    """文化知识库条目（PRD V1.1 §6.7 / D4）。
+
+    只有 verified=True 的条目才能作为「出处」被写词与史实核对引用；
+    AI 起草的条目（source_type=ai_draft）默认未核实，必须由人核对后点「核实」。
+    """
+
+    __tablename__ = "kb_entry"
+
+    destination: Mapped[str] = mapped_column(String(100), index=True)
+    title: Mapped[str] = mapped_column(String(200))
+    content: Mapped[str] = mapped_column(Text, default="")
+    source_name: Mapped[str] = mapped_column(String(200), default="")
+    source_url: Mapped[str] = mapped_column(String(500), default="")
+    # official / academic / encyclopedia / field（人工查证）/ other / ai_draft
+    source_type: Mapped[str] = mapped_column(String(20), default="other")
+    verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    verified_by: Mapped[str] = mapped_column(String(60), default="")
+    from_check_id: Mapped[str] = mapped_column(String(36), default="")
 
 
 # --------------------------------------------------------------------- 调用日志

@@ -102,7 +102,7 @@ def check(c: LyricCheck) -> dict:
     return {"id": c.id, "type": c.type, "section": c.section, "line_no": c.line_no,
             "text": c.text, "status": status, "evidence": c.evidence,
             "suggestions": c.suggestions or [], "keep_reason": c.keep_reason or "",
-            "needs_manual": bool(c.needs_manual)}
+            "needs_manual": bool(c.needs_manual), "kb_entry_ids": c.kb_entry_ids or []}
 
 
 def model(m: MusicModel, *, capabilities: dict | None = None, effective: str = "",

@@ -506,3 +506,63 @@ def test_render_short_end_to_end(tmp_path):
                           need_ai_card=True, ai_card=False)
     names = {c["name"] for c in bad["checks"] if not c["ok"]}
     assert {"时长", "分辨率", "字幕", "AI 字卡"} <= names
+
+
+# ------------------------------------------------------------------ 文化知识库（D4 / §6.7）
+def test_kb_crud_and_verification(client):
+    r = client.post("/api/kb", json={"destination": "吉林·长白山", "title": "满语名称",
+                                     "content": "长白山满语称果勒敏珊延阿林，意为长白山。",
+                                     "source_type": "encyclopedia", "verified": True})
+    assert r.status_code == 400 and "出处" in r.json()["detail"], "已核实条目必须写出处"
+    r = client.post("/api/kb", json={"destination": "吉林·长白山", "title": "满语名称",
+                                     "content": "长白山满语称果勒敏珊延阿林，意为长白山。",
+                                     "source_name": "长白山管委会官网", "source_type": "official",
+                                     "verified": True})
+    assert r.status_code == 200 and r.json()["verified"]
+    # AI 起草的条目不能直接核实：要改成真实来源
+    r = client.post("/api/kb", json={"destination": "长白山", "title": "天池", "content": "天池是火山口湖。",
+                                     "source_type": "ai_draft", "source_name": "百科"})
+    eid = r.json()["id"]
+    assert not r.json()["verified"]
+    assert client.post(f"/api/kb/{eid}/verify", json={}).status_code == 400
+    r = client.post(f"/api/kb/{eid}/verify", json={"source_type": "encyclopedia", "source_name": "百度百科·长白山天池"})
+    assert r.status_code == 200 and r.json()["verified"]
+    cov = client.get("/api/kb/coverage?destination=吉林·长白山").json()
+    assert cov["verified"] >= 2 and cov["destination"] == "长白山"
+    hits = client.get("/api/kb?destination=长白山&q=满语").json()["items"]
+    assert hits and hits[0]["title"] == "满语名称"
+
+
+def test_fact_check_cites_kb(client, monkeypatch):
+    """史实疑点能引用到已核实条目时：写明出处、不再标「需人工核实」。"""
+
+    from app.db import SessionLocal
+    from app.models import LyricVersion
+    from app.services import lyrics as L
+
+    calls = {}
+
+    def fake(messages, fallback=None, purpose="", project_id="", temperature=0.3):
+        if purpose == "lyrics_check":
+            calls["kb_in_prompt"] = "果勒敏珊延阿林" in messages[-1]["content"]
+            return {"issues": [{"type": "fact", "section": "桥段", "line_no": 1, "text": "x",
+                                "evidence": "满语名意为长白山，不是六月飘雪", "kb": [1], "suggestions": []},
+                               {"type": "fact", "section": "桥段", "line_no": 2, "text": "y",
+                                "evidence": "资料未覆盖", "suggestions": []}]}, True
+        return (fallback or {}), True
+    monkeypatch.setattr(L.llm, "json_chat", fake)
+    with SessionLocal() as db:
+        ver = LyricVersion(project_id=CHANGBAI, version=99, checks_done=False,
+                           sections=[{"name": "桥段", "lines": ["满语里它叫果勒敏珊延阿林", "意为六月飘雪的圣山"]}])
+        db.add(ver)
+        db.commit()
+        rows = L.run_checks(db, ver)
+        cited = [r for r in rows if r.kb_entry_ids]
+        manual = [r for r in rows if r.needs_manual]
+        assert calls["kb_in_prompt"], "核对时应把已核实条目带给模型"
+        assert len(cited) == 1 and "据知识库" in cited[0].evidence and not cited[0].needs_manual
+        assert len(manual) == 1 and "需人工核实" in manual[0].evidence
+        from app.models import LyricCheck
+        db.query(LyricCheck).filter(LyricCheck.lyric_version_id == ver.id).delete()
+        db.delete(ver)
+        db.commit()

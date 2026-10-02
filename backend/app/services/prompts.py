@@ -43,7 +43,7 @@ def _pick(pool: list[str], rnd: random.Random, n: int) -> list[str]:
 
 # ------------------------------------------------------------------ 1 歌词生成
 def lyrics_messages(destination: str, genre: str, mood: list[str], duration_s: int,
-                    style_prompt: str, forbidden: str = "") -> list[dict]:
+                    style_prompt: str, forbidden: str = "", kb_text: str = "") -> list[dict]:
     sys = (
         "你是中国文旅原创歌曲的词作者。写一首中文歌词，要求：\n"
         "1. 每行 6-12 个汉字，押韵自然，避免生造词；\n"
@@ -60,6 +60,8 @@ def lyrics_messages(destination: str, genre: str, mood: list[str], duration_s: i
         f"目标时长：{duration_s} 秒\n风格提示词参考：{style_prompt or '（无）'}\n"
         f"禁用内容：{forbidden or '（无）'}\n"
         "地理与文化描述必须真实可考，不要虚构地名或历史事件。"
+        + (f"\n\n以下是已核实的目的地资料，写具体地名、史实、典故时只使用这里有的内容：\n{kb_text}"
+           if kb_text else "")
     )
     return [{"role": "system", "content": sys}, {"role": "user", "content": user}]
 
@@ -106,7 +108,7 @@ def rewrite_fallback(lines: list[str]) -> dict:
 
 
 # ------------------------------------------------------------------ 3 自动检查
-def check_messages(sections: list[dict], destination: str) -> list[dict]:
+def check_messages(sections: list[dict], destination: str, kb_text: str = "") -> list[dict]:
     """押韵与史实检查（字数由规则计算，不交给 LLM —— 它数不准中文字数）。"""
     sys = (
         "你是中文歌词审校。只做两项检查：\n"
@@ -119,11 +121,16 @@ def check_messages(sections: list[dict], destination: str) -> list[dict]:
         "只输出 JSON：{\"issues\":[{\"type\":\"rhyme|fact\",\"section\":\"主歌1\",\"line_no\":3,"
         "\"text\":\"原行\",\"evidence\":\"依据\",\"suggestions\":[\"完整改写1\",\"完整改写2\"]}]}。"
         "line_no 从 1 开始、按段落内计数。没有问题的行不要输出。"
+        + ("\n下面给出已核实资料（带编号）。判断史实时以资料为准：歌词与资料矛盾的必须指出，"
+           "并在 kb 字段里写上依据的资料编号（如 [2]）；资料里没有覆盖的内容才写「需人工核实」。"
+           "issues 每项可多一个字段 \"kb\": [编号]。" if kb_text else "")
     )
     body = "\n".join(f"[{s['name']}]\n" + "\n".join(f"{i}. {ln}" for i, ln in enumerate(s.get("lines", []), 1))
                      for s in sections)
-    return [{"role": "system", "content": sys},
-            {"role": "user", "content": f"目的地：{destination}\n歌词：\n{body}"}]
+    user = f"目的地：{destination}\n歌词：\n{body}"
+    if kb_text:
+        user += f"\n\n已核实资料：\n{kb_text}"
+    return [{"role": "system", "content": sys}, {"role": "user", "content": user}]
 
 
 def meter_fix_messages(items: list[dict], destination: str) -> list[dict]:
