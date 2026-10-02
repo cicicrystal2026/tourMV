@@ -16,12 +16,13 @@ export function PageHeader({
   return (
     <header className="px-6 pt-5 pb-4 border-b border-line bg-page sticky top-0 z-10">
       {crumbs && <div className="text-[12px] text-ink-faint mb-1.5">{crumbs}</div>}
-      <div className="flex items-start gap-4">
-        <div className="min-w-0 flex-1">
+      {/* 窄窗口下按钮换行，标题保底宽度：原来按钮不收缩，会把标题挤成一字一行的竖条 */}
+      <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
+        <div className="min-w-[260px] flex-1">
           <h1 className="font-serif text-[22px] font-medium text-ink leading-tight">{title}</h1>
           {subtitle && <div className="mt-1 text-[12px] text-ink-soft">{subtitle}</div>}
         </div>
-        {actions && <div className="flex items-center gap-2 shrink-0">{actions}</div>}
+        {actions && <div className="flex flex-wrap items-center justify-end gap-2">{actions}</div>}
       </div>
     </header>
   )
