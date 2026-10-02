@@ -86,6 +86,8 @@ def check(db: Session, p: Project) -> Gate:
         from .services import storyboard as storyboard_svc
 
         prog = storyboard_svc.progress(db, p.id)
+        if storyboard_svc.is_stale(db, p.id):
+            g.fail("歌词已更新，现有配图对应的是旧歌词，请重新出图")
         if not prog["total"]:
             g.fail("还没有逐句配图")
         elif not prog["all_approved"]:

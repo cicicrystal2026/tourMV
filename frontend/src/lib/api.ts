@@ -254,6 +254,11 @@ export const api = {
     return post(`/api/projects/${id}/storyboard/shots/${shotId}/regenerate?${q}`, {})
   },
   storyboardApproveAll: (id: string) => post(`/api/projects/${id}/storyboard/approve-all`, {}),
+  /** 一键通过机器预审「建议通过」的句子 */
+  storyboardApproveSuggested: (id: string) => post(`/api/projects/${id}/storyboard/approve-suggested`, {}),
+  /** 换成素材库实拍（默认用系统推荐的那条） */
+  storyboardUseLibrary: (id: string, shotId: string, assetId = '') =>
+    post(`/api/projects/${id}/storyboard/shots/${shotId}/use-library?asset_id=${encodeURIComponent(assetId)}`, {}),
   storyboardUpload: async (id: string, shotId: string, file: File) => {
     const fd = new FormData()
     fd.append('file', file)

@@ -33,7 +33,7 @@ class ElevenAdapter(MusicAdapter):
     @property
     def ready(self) -> bool:
         s = settings()
-        return bool(s.eleven_api_key) and not s.force_mock
+        return bool(s.eleven_api_key) and not (s.force_mock or s.music_force_mock)
 
     def _headers(self) -> dict:
         return {"xi-api-key": settings().eleven_api_key}

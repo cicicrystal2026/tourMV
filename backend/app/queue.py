@@ -160,6 +160,7 @@ def start(api_concurrency: int = 4, gpu_concurrency: int = 1) -> None:
     if _running:
         return
     _running = True
+    _recover_interrupted()
     for i in range(api_concurrency):
         t = threading.Thread(target=_loop, args=("api",), name=f"api-worker-{i}", daemon=True)
         t.start()
@@ -169,6 +170,24 @@ def start(api_concurrency: int = 4, gpu_concurrency: int = 1) -> None:
         t.start()
         _threads.append(t)
     log.info("队列已启动：api=%d gpu=%d", api_concurrency, gpu_concurrency)
+
+
+def _recover_interrupted() -> None:
+    """进程重启时，库里还是 running 的任务其实已经死了：标为失败、可在看板重试。
+
+    不自动重跑 —— 这些任务多半在调付费接口（生曲 / 出图），自动重跑可能重复扣费。
+    V1.0 没有这一步，重启后这类任务永远显示「运行中」。
+    """
+    from datetime import datetime, timezone
+
+    try:
+        with session_scope() as db:
+            for j in db.query(Job).filter(Job.status == "running"):
+                j.status = "failed"
+                j.error = "服务重启，任务被中断；如需要请点「重试」"
+                j.finished_at = datetime.now(timezone.utc)
+    except Exception as e:  # noqa: BLE001
+        log.warning("恢复中断任务失败：%s", e)
 
 
 def stop() -> None:

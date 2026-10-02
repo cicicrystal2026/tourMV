@@ -81,7 +81,7 @@ class MurekaAdapter(MusicAdapter):
     @property
     def ready(self) -> bool:
         s = settings()
-        return bool(s.mureka_api_key) and not s.force_mock
+        return bool(s.mureka_api_key) and not (s.force_mock or s.music_force_mock)
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {settings().mureka_api_key}"}

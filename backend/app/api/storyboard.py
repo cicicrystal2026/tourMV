@@ -28,12 +28,15 @@ def _image_budget(db: Session, project_id: str, count: int | None, provider: str
     """出图按张计费：派发前按张数估算，超出当日上限就拒绝（PRD V1.1 §11）。"""
     from ..adapters import image as image_ad
     from ..services import budget
-    from ..services import lyrics as lyrics_svc
 
     if count is None:
-        ver = lyrics_svc.latest(db, project_id)
-        count = len(lyrics_svc.all_lines(ver)) if ver else 0
-    budget.ensure_budget(db, count * image_ad.price(provider or None), what=f"{count} 张配图")
+        # 副歌复唱句不单独出图：按去重后的句数估算
+        try:
+            count = svc.unique_line_count(db, project_id)
+        except ProjectError:
+            count = 0
+    # 每张图 + 一次视觉预审（约 ¥0.004）
+    budget.ensure_budget(db, count * (image_ad.price(provider or None) + 0.004), what=f"{count} 张配图")
 
 
 @router.get("")
@@ -133,6 +136,22 @@ async def upload(project_id: str, shot_id: str,
         _fail(e)
     except Exception as e:  # noqa: BLE001
         _fail(e, 502)
+
+
+@router.post("/approve-suggested")
+def approve_suggested(project_id: str, db: Session = Depends(get_db)) -> dict:
+    """一键通过机器预审「建议通过」的句子，低分的留给人看。"""
+    return svc.approve_suggested(db, project_id)
+
+
+@router.post("/shots/{shot_id}/use-library")
+def use_library(project_id: str, shot_id: str, asset_id: str = "",
+                db: Session = Depends(get_db)) -> dict:
+    """把这句换成素材库实拍（默认用系统推荐的那条）。"""
+    try:
+        return svc.use_library(db, shot_id, asset_id)
+    except ProjectError as e:
+        _fail(e)
 
 
 @router.post("/approve-all")

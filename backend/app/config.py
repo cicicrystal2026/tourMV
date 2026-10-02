@@ -104,6 +104,8 @@ class Settings:
         # 生产环境必须关掉 —— 否则未配 Key 的模型会静默产出占位音频，混进候选与统计。
         # 全局 FORCE_MOCK 时自动允许（那本来就是「整站演示」模式）。
         self.allow_mock = self.force_mock or os.environ.get("ALLOW_MOCK", "0") == "1"
+        # 只让音乐走 mock（其余真实调用）。测试环境要看真实出图效果、又不想误触发付费生曲时用
+        self.music_force_mock = os.environ.get("MUSIC_FORCE_MOCK", "0") == "1"
 
         # PRD V1.1 §11 安全：访问口令。留空 = 不启用（仅限本机开发）。
         # 线上部署必须配置，否则任何人都能读数据、触发付费生成。

@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import clsx from 'clsx'
 import api from '../lib/api'
 import { Banner, Empty, Modal, PageHeader, ProgressBar, Section, Spinner } from '../components/ui'
+import ReviewPager, { AiVerdict } from '../components/ReviewPager'
 
 const STATUS_TONE: Record<string, string> = {
   draft: 'tag',
@@ -25,6 +26,8 @@ export default function StoryboardPage() {
   const [editShot, setEditShot] = useState<any>(null)
   const [draftPrompt, setDraftPrompt] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
+  // 默认翻页审片：一句歌词 + 一张大图，比 24 张小卡片好判断
+  const [view, setView] = useState<'pager' | 'grid'>('pager')
   const uploadFor = useRef<string>('')
 
   const load = useCallback(
@@ -50,6 +53,8 @@ export default function StoryboardPage() {
   }, [projectId, load])
 
   const items: any[] = data?.items || []
+  // 副歌复唱句跟随母句，只审母句
+  const masters = useMemo(() => items.filter((x) => !x.dup_of), [items])
   const prog = data?.progress || { total: 0, approved: 0, pending: 0, rejected: 0 }
   const providers: any[] = data?.providers || []
 
@@ -168,19 +173,32 @@ export default function StoryboardPage() {
               title={
                 // 不再要求生图模型就绪：先在素材库找实拍镜头，找不到才用 AI 补位（PRD V1.1 D1）
                 providers.some((x) => x.key === provider && x.ready)
-                  ? '先从素材库匹配实拍镜头，匹配不到的句子再用所选模型生成'
+                  ? 'AI 逐句出分镜（副歌复唱只出一次），出完自动预审；素材库有实拍时会提示可替换'
                   : data?.allow_mock
                     ? '生图模型未配置：先从素材库匹配，匹配不到的句子生成占位画面（演示模式）'
                     : '生图模型未配置：只从素材库匹配实拍镜头，匹配不到的句子会标为缺镜头'
               }
               onClick={() =>
                 act('enqueue', () => api.storyboardEnqueue(projectId!, provider), () => {
-                  setMsg('已开始：先从素材库匹配实拍镜头，匹配不到的再 AI 补位，页面会自动刷新')
+                  setMsg('已开始：AI 逐句出分镜并自动预审打分，完成后你只需看标红的几张。页面会自动刷新')
                   load(projectId!)
                 })
               }
             >
-              {busy === 'enqueue' ? '提交中…' : working ? '匹配/出图中…' : '开始匹配镜头'}
+              {busy === 'enqueue' ? '提交中…' : working ? '出图中…' : '开始出图'}
+            </button>
+            <button
+              className="btn-primary"
+              disabled={!!busy || !prog.suggest_pass}
+              title="通过机器预审打分较高的句子；低分的留给你在「翻页审片」里看"
+              onClick={() =>
+                act('suggested', () => api.storyboardApproveSuggested(projectId!), (r) => {
+                  setMsg(`已通过 ${r.approved} 句机器建议通过的画面`)
+                  load(projectId!)
+                })
+              }
+            >
+              通过机器建议（{prog.suggest_pass || 0}）
             </button>
             <button
               className="btn"
@@ -225,14 +243,45 @@ export default function StoryboardPage() {
         )}
 
         <div className="card px-4 py-3 flex flex-wrap items-center gap-x-5 gap-y-2">
+          {/* 按「需要审的句数」说话：副歌复唱已合并，机器预审高分的建议直接通过 */}
           <div className="text-[12px]">
-            进度 <span className="font-medium">{prog.approved}</span> / {prog.total} 句已通过
+            已通过 <span className="font-medium">{prog.unique_approved ?? prog.approved}</span> / {prog.unique ?? prog.total} 句
+            {!!prog.unique && prog.unique < prog.total && (
+              <span className="text-ink-faint">（共 {prog.total} 句，副歌复唱已合并）</span>
+            )}
           </div>
-          {!!prog.pending && <span className="tag-human">待审核 {prog.pending}</span>}
+          {!!prog.need_review && <span className="tag-human">需要你看 {prog.need_review}</span>}
+          {!!prog.suggest_pass && <span className="tag-brand">机器建议通过 {prog.suggest_pass}</span>}
           {!!prog.rejected && <span className="tag-human">需重做 {prog.rejected}</span>}
           {!!prog.by_status?.draft && <span className="tag">待生成 {prog.by_status.draft}</span>}
-          <div className="flex-1 min-w-[160px]">
-            <ProgressBar value={prog.total ? (prog.approved / prog.total) * 100 : 0} />
+          <div className="flex-1 min-w-[120px]">
+            <ProgressBar value={prog.unique ? (prog.unique_approved / prog.unique) * 100 : 0} />
+          </div>
+          {prog.ai_ratio > 0 && (
+            <span
+              className={prog.ai_ratio > prog.ai_ratio_limit ? 'tag-human' : 'tag'}
+              title="产品约定：AI 画面占比建议不超过 30%，超出只提醒、不拦截。素材库有实拍时可一键替换"
+            >
+              AI 画面 {Math.round(prog.ai_ratio * 100)}%
+              {prog.ai_ratio > prog.ai_ratio_limit &&
+                (prog.replaceable ? `（建议 ≤30%，可替换实拍 ${prog.replaceable} 句）` : '（建议 ≤30%）')}
+            </span>
+          )}
+          <div className="flex rounded-btn border border-line overflow-hidden text-[11px]">
+            {(
+              [
+                ['pager', '翻页审片'],
+                ['grid', '全部卡片'],
+              ] as const
+            ).map(([k, label]) => (
+              <button
+                key={k}
+                className={clsx('px-2.5 py-1', view === k ? 'bg-brand text-white' : 'bg-white text-ink-soft')}
+                onClick={() => setView(k)}
+              >
+                {label}
+              </button>
+            ))}
           </div>
           <label className="flex items-center gap-2 text-[11px] text-ink-soft">
             生图模型
@@ -255,6 +304,11 @@ export default function StoryboardPage() {
         {locked && (
           <Banner tone="warn">该项目已交付并锁定，只读。需要调整请回词曲工作台「新建修订版」。</Banner>
         )}
+        {!locked && data?.stale && (
+          <Banner tone="warn">
+            歌词已经更新，下面的画面对应的是旧歌词。点右上角「开始出图」会按新歌词重新出分镜。
+          </Banner>
+        )}
         {!data ? (
           !err && <Spinner label="加载配图" />
         ) : !items.length ? (
@@ -265,12 +319,48 @@ export default function StoryboardPage() {
                 : '还没有分镜。先「重新提炼景区」，再点「开始/继续出图」。'
             }
           />
+        ) : view === 'pager' ? (
+          <ReviewPager
+            shots={masters}
+            threshold={prog.suggest_pass_threshold ?? 75}
+            busy={busy}
+            readOnly={locked}
+            onApprove={(s) => act(`ap-${s.id}`, () => api.storyboardApprove(projectId!, s.id), () => load(projectId!))}
+            onReject={(s) => act(`rj-${s.id}`, () => api.storyboardReject(projectId!, s.id), () => load(projectId!))}
+            onRegen={(s) =>
+              act(`rg-${s.id}`, () => api.storyboardRegenerate(projectId!, s.id, { provider }), () => {
+                setMsg('已开始重出这一张，稍等自动刷新')
+                load(projectId!)
+              })
+            }
+            onEditPrompt={(s) => {
+              setEditShot(s)
+              setDraftPrompt(s.prompt || '')
+            }}
+            onUpload={(s) => {
+              uploadFor.current = s.id
+              fileRef.current?.click()
+            }}
+            onUseLibrary={(s) =>
+              act(`lib-${s.id}`, () => api.storyboardUseLibrary(projectId!, s.id), () => {
+                setMsg(`第 ${s.order} 句已换成素材库镜头`)
+                load(projectId!)
+              })
+            }
+          />
         ) : (
           <div className="grid grid-cols-3 gap-4">
-            {items.map((s) => (
+            {masters.map((s) => (
               <ShotCard
                 key={s.id}
                 shot={s}
+                threshold={prog.suggest_pass_threshold ?? 75}
+                onUseLibrary={() =>
+                  act(`lib-${s.id}`, () => api.storyboardUseLibrary(projectId!, s.id), () => {
+                    setMsg(`第 ${s.order} 句已换成素材库镜头`)
+                    load(projectId!)
+                  })
+                }
                 // 已交付只读：用一个非空 busy 让卡片上的操作按钮统一置灰
                 busy={locked ? 'locked' : busy}
                 onApprove={() =>
@@ -380,6 +470,8 @@ export default function StoryboardPage() {
 
 function ShotCard({
   shot,
+  threshold,
+  onUseLibrary,
   busy,
   onApprove,
   onReject,
@@ -388,6 +480,8 @@ function ShotCard({
   onUpload,
 }: {
   shot: any
+  threshold: number
+  onUseLibrary: () => void
   busy: string
   onApprove: () => void
   onReject: () => void
@@ -465,7 +559,18 @@ function ShotCard({
         </div>
         <div className="text-[12px] text-ink-soft leading-relaxed border-l-2 border-line pl-2">
           {shot.line_text}
+          {shot.repeats > 0 && <span className="ml-1 tag">副歌复唱 ×{shot.repeats + 1}</span>}
         </div>
+        {shot.image_url && shot.status === 'pending' && <AiVerdict shot={shot} threshold={threshold} compact />}
+        {shot.suggest && (
+          <button
+            className="text-left text-[11px] text-brand underline disabled:opacity-50"
+            disabled={!!busy}
+            onClick={onUseLibrary}
+          >
+            有{shot.suggest.is_seed ? '演示素材' : '实拍'}可替换：{shot.suggest.name} → 换成它
+          </button>
+        )}
         {shot.error && <div className="text-[11px] text-human leading-relaxed">{shot.error}</div>}
         {shot.note && <div className="text-[11px] text-ink-faint">备注：{shot.note}</div>}
 

@@ -75,15 +75,28 @@ def _lyric_lines(db: Session, project_id: str) -> list[dict]:
     return out[:MAX_LINES]
 
 
+def is_stale(db: Session, project_id: str) -> bool:
+    """分镜是否对应的是旧歌词（逐句比对文本）。"""
+    rows = shots(db, project_id)
+    if not rows:
+        return False
+    try:
+        cur = [x["text"] for x in _lyric_lines(db, project_id)]
+    except ProjectError:
+        return False
+    return [r.line_text for r in rows] != cur
+
+
 # ------------------------------------------------------------------ 1) 提炼
 def plan(db: Session, project_id: str, *, force: bool = False) -> dict:
     """逐句提炼真实景观。已有分镜且未 force 时不重复调用（省 token）。"""
     p = get_project(db, project_id)
     lines = _lyric_lines(db, project_id)
     exist = shots(db, project_id)
-    if exist and not force:
+    if exist and not force and not is_stale(db, project_id):
         return {"created": 0, "total": len(exist),
                 "note": "已有分镜，未重复生成（需要重做请传 force）"}
+    # 歌词改过（驳回重写 / 修订版）时旧分镜作废：否则会拿上一版歌词的画面去卡点
     for s in exist:
         db.delete(s)
     db.commit()
@@ -114,6 +127,7 @@ def plan(db: Session, project_id: str, *, force: bool = False) -> dict:
             status="draft",
         ))
     db.commit()
+    mark_dups(db, project_id)
     miss = len(lines) - len(by_line)
     return {
         "created": len(lines), "total": len(lines), "llm": real, "missing": max(0, miss),
@@ -189,10 +203,19 @@ def _render_one(row: StoryboardShot, p: Project, provider: str
         image_ad.text_to_image(softened, raw, provider=provider, project_id=p.id)
         note = (f"上游合规检查拦截了「{row.place}」，已自动改用中性描述出图；"
                 "如需精确实景建议上传自有图")[:300]
-    if not media.is_valid_image(raw):
-        raise RuntimeError("出图不完整（文件损坏）")
-    # 统一转成 JPEG：PNG 一张 1.5MB 起，18 句就是 30MB，白白撑大发布包
-    media.to_jpeg(raw, img, quality=90)
+    # 统一转成 JPEG：PNG 一张 1.5MB 起，18 句就是 30MB，白白撑大发布包。
+    # 偶发下载不完整会让 ffmpeg 转码失败（E2E 实测），这里整张重出一次再放弃
+    for attempt in range(2):
+        try:
+            if not media.is_valid_image(raw):
+                raise RuntimeError("出图不完整（文件损坏）")
+            media.to_jpeg(raw, img, quality=90)
+            break
+        except Exception:  # noqa: BLE001
+            if attempt == 1:
+                raise RuntimeError("出图文件损坏，重出一次仍失败") from None
+            raw.unlink(missing_ok=True)
+            image_ad.text_to_image(prompt, raw, provider=provider, project_id=p.id)
     raw.unlink(missing_ok=True)
     if not media.is_valid_image(img):
         raise RuntimeError("转 JPEG 后校验失败")
@@ -201,23 +224,56 @@ def _render_one(row: StoryboardShot, p: Project, provider: str
     return img, clip, thumb, note
 
 
-# ------------------------------------------------------------------ 镜头来源兜底链
-# PRD V1.1 D1「实拍优先、AI 补位」。每句按顺序尝试，命中即停：
-#   1. library     素材库实拍镜头（同目的地 + 关键词匹配，一支片内不重复用）
-#   2. library_ai  素材库里已有的同目的地 AI 画面（复用，不再花钱）
-#   3. wanx / seedream  新生成 AI 画面（按张计费，需凭证）
-#   4. placeholder 占位画面 —— 仅演示模式（ALLOW_MOCK / FORCE_MOCK）；生产环境闸门不放行
-# V1.0 只有第 3 步，生图模型没配好整页就卡在「待生成」。
+# ------------------------------------------------------------------ 镜头来源与审核减负
+# 2026-10-01 产品决定（修订 PRD V1.1 D1）：「AI 先出分镜，有实拍再替换」。
+#   · 生图模型就绪：每句（去重后）先出 AI 图 → 视觉模型预审打分 → 运营只看低分的；
+#     素材库里有同目的地实拍时，卡片提示「有实拍可替换」，一键换上；
+#   · 生图模型未就绪：退回素材库检索（实拍 → 已有 AI 画面 → 演示素材），
+#     演示模式再兜底占位画面；生产环境如实标「缺镜头」。
+# AI 画面占比 30% 只作提醒（看板 / 审核页显示），不做硬拦截。
 SOURCE_LABEL = {
     "library": "素材库实拍", "library_ai": "复用素材库 AI 画面", "library_seed": "演示素材（非实拍）",
     "wanx": "AI 生成·通义万相", "seedream": "AI 生成·Seedream",
     "placeholder": "占位画面（演示模式）", "upload": "用户上传",
+    "borrowed": "沿用前句画面（AI 出图失败）",
 }
+AI_SOURCES = {"wanx", "seedream", "library_ai", "borrowed"}
+# 预审分数 ≥ 该值标「建议通过」，人只需抽查；低于的标红、必须人看
+SUGGEST_PASS = 75
 
 
 def _dest_core(destination: str) -> str:
     """「吉林·长白山」→「长白山」：素材库里目的地写法不统一，按核心地名匹配。"""
     return (destination or "").replace("•", "·").split("·")[-1].strip()
+
+
+def _norm_line(text: str) -> str:
+    return "".join(c for c in (text or "") if c.isalnum())
+
+
+def mark_dups(db: Session, project_id: str) -> int:
+    """副歌复唱的句子只审一次：同样的歌词跟随第一次出现的那句（母句）。返回需要审的句数。"""
+    first: dict[str, int] = {}
+    masters = 0
+    for r in shots(db, project_id):
+        k = _norm_line(r.line_text)
+        if k and k in first:
+            r.dup_of = first[k]
+        else:
+            r.dup_of = 0
+            masters += 1
+            if k:
+                first[k] = r.order
+    db.commit()
+    return masters
+
+
+def unique_line_count(db: Session, project_id: str) -> int:
+    rows = shots(db, project_id)
+    if rows:
+        return len([r for r in rows if not r.dup_of]) or len(rows)
+    lines = _lyric_lines(db, project_id)
+    return len({_norm_line(x["text"]) for x in lines})
 
 
 def _tokens(row: StoryboardShot) -> list[str]:
@@ -241,6 +297,8 @@ def _library_pick(db: Session, p: Project, row: StoryboardShot, used: set[str],
             continue
         if a.has_portrait and not (a.portrait or "").strip():
             continue      # 肖像权未登记不进候选（PRD F4 交互规则）
+        if a.licensor and a.licensor.startswith("占位画面"):
+            continue      # 系统生成的占位画面不能当素材推荐
         kind = "ai" if a.source == "ai" else ("seed" if a.is_seed else "shot")
         if kind != tier:
             continue
@@ -277,6 +335,9 @@ def _use_library(db: Session, row: StoryboardShot, a: Asset, source: str) -> Non
     row.note = f"{SOURCE_LABEL[source]}：{a.name}（{a.licensor or '未登记授权方'}）"[:300]
     row.error = ""
     row.status = "pending"
+    row.ai_score, row.ai_reason = -1, ""
+    if row.suggest_asset_id == a.id:
+        row.suggest_asset_id = ""
 
 
 def _placeholder(db: Session, row: StoryboardShot, p: Project) -> None:
@@ -294,15 +355,106 @@ def _placeholder(db: Session, row: StoryboardShot, p: Project) -> None:
     row.note = "素材库无匹配镜头、生图模型未配置：已生成占位画面（仅演示模式可用）"
     row.error = ""
     row.status = "pending"
+    row.ai_score, row.ai_reason = -1, ""
+
+
+def _borrow(db: Session, p: Project, row: StoryboardShot, reason: str) -> bool:
+    """AI 出不了图时不留空卡（产品决定）：先找素材库，再借用最近一句已有画面。
+
+    借来的画面标「沿用前句画面」、不打预审分（必须人看），随时可以「重新出一张」。
+    找不到任何可借的画面时返回 False，保持「需重做」。
+    """
+    used = {r.asset_id for r in shots(db, p.id) if r.asset_id and r.id != row.id}
+    for tier in ["shot", "ai"] + (["seed"] if settings().allow_mock else []):
+        a = _library_pick(db, p, row, used, tier)
+        if a is not None:
+            _use_library(db, row, a, {"shot": "library", "ai": "library_ai", "seed": "library_seed"}[tier])
+            row.note = f"AI 出图失败，已从素材库匹配：{a.name}"[:300]
+            return True
+    donors = [r for r in shots(db, p.id)
+              if r.id != row.id and not r.dup_of and r.image_path and r.status != "rejected"
+              and Path(r.image_path).exists()]
+    if not donors:
+        return False
+    # 同一段落里最近的前一句优先，其次全曲最近的前一句，再次最近的后一句
+    same = [r for r in donors if r.section == row.section and r.order < row.order]
+    before = [r for r in donors if r.order < row.order]
+    pick = (max(same, key=lambda r: r.order) if same else
+            max(before, key=lambda r: r.order) if before else
+            min(donors, key=lambda r: r.order))
+    row.image_path, row.clip_path, row.asset_id = pick.image_path, pick.clip_path, pick.asset_id
+    row.provider, row.model = "borrowed", f"第{pick.order}句"
+    row.status = "pending"
+    row.ai_score, row.ai_reason, row.suggest_asset_id = -1, "", ""
+    row.error = ""
+    row.note = f"AI 出图失败（{reason[:60]}），暂用第 {pick.order} 句画面代替；可点「重新出一张」再试"[:300]
+    return True
+
+
+def sync_dups(db: Session, master: StoryboardShot) -> None:
+    """母句的画面、状态、预审结果同步给它的复唱句（审一次，全部生效）。"""
+    for r in shots(db, master.project_id):
+        if r.dup_of == master.order and r.id != master.id:
+            r.image_path, r.clip_path, r.asset_id = master.image_path, master.clip_path, master.asset_id
+            r.provider, r.model, r.status = master.provider, master.model, master.status
+            r.ai_score, r.ai_reason = master.ai_score, master.ai_reason
+            r.suggest_asset_id, r.error = master.suggest_asset_id, master.error
+            r.note = f"副歌复唱：画面跟随第 {master.order} 句"
+            r.place, r.prompt, r.rev = master.place, master.prompt, master.rev
+
+
+def _judge(rows: list[StoryboardShot], p: Project) -> dict[str, dict | None]:
+    """并发跑视觉预审（只读文件、不碰数据库）。"""
+    from ..adapters import vlm
+
+    if not vlm.judge_ready() or not rows:
+        return {}
+    args = [(r.id, r.image_path, r.line_text, r.place) for r in rows if r.image_path]
+
+    def one(a):
+        rid, img, line, place = a
+        return rid, vlm.judge_image(img, line, place, p.destination or "", project_id=p.id)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        return dict(pool.map(one, args))
+
+
+def _apply_judge(db: Session, rows: list[StoryboardShot], p: Project) -> None:
+    res = _judge(rows, p)
+    for r in rows:
+        j = res.get(r.id)
+        if j:
+            r.ai_score, r.ai_reason = j["score"], j["reason"]
+    db.commit()
+
+
+def _suggest_real(db: Session, p: Project, masters: list[StoryboardShot]) -> None:
+    """给 AI 画面找可替换的素材库实拍（一支片内不重复推荐同一个镜头）。
+
+    演示模式下演示素材也参与推荐（界面会标「演示素材」），让替换流程能被体验到。
+    """
+    used = {r.asset_id for r in shots(db, p.id) if r.asset_id and r.provider and r.provider.startswith("library")}
+    tiers = ["shot"] + (["seed"] if settings().allow_mock else [])
+    for r in masters:
+        r.suggest_asset_id = ""
+        if r.provider not in AI_SOURCES and r.provider != "placeholder":
+            continue      # 本来就是实拍 / 上传的不需要推荐
+        for tier in tiers:
+            a = _library_pick(db, p, r, used, tier)
+            if a is not None:
+                r.suggest_asset_id = a.id
+                used.add(a.id)
+                break
+    db.commit()
 
 
 def generate(db: Session, project_id: str, *, shot_ids: list[str] | None = None,
              provider: str | None = None, force: bool = False,
              on_progress=None) -> dict:
-    """按兜底链为每句配镜头（素材库实拍 → 复用 AI → 新生成 AI → 占位），返回统计。
+    """为每句配画面并预审，返回统计。
 
     默认只补「还没有图」和「被驳回」的，已有待审图的不会重复花钱；
-    要整批重做传 `force=True`。
+    要整批重做传 `force=True`。副歌复唱句不单独出图，跟随母句。
     """
     p = get_project(db, project_id)
     provider = (provider or image_ad.default_provider()).strip().lower()
@@ -310,63 +462,59 @@ def generate(db: Session, project_id: str, *, shot_ids: list[str] | None = None,
     allow_mock = settings().allow_mock
 
     rows = shots(db, project_id)
-    if not rows:
-        plan(db, project_id)
+    if not rows or is_stale(db, project_id):
+        plan(db, project_id, force=bool(rows))
         rows = shots(db, project_id)
+    mark_dups(db, project_id)
+    rows = shots(db, project_id)
     if shot_ids:
         want = set(shot_ids)
         rows = [r for r in rows if r.id in want]
-    todo = rows if force else [r for r in rows if not r.image_path or r.status == "rejected"]
+    todo = [r for r in (rows if force else [r for r in rows if not r.image_path or r.status == "rejected"])
+            if not r.dup_of]
     if not todo:
-        return {"ok": 0, "failed": 0, "total": 0, "errors": [],
+        return {"ok": 0, "failed": 0, "total": 0, "errors": [], "by_source": {},
                 "note": "没有待生成的句子（都已有图）"}
 
     for r in todo:
         r.status = "generating"
         r.error = ""
+        r.ai_score, r.ai_reason = -1, ""
     db.commit()
 
-    # 1–2) 素材库检索（同一支片内不重复用同一个镜头，PRD F6-6）
-    todo_ids = {r.id for r in todo}
-    used = {r.asset_id for r in shots(db, project_id)
-            if r.asset_id and r.id not in todo_ids and r.status != "rejected"}
-    tiers = ["shot", "ai"] + (["seed"] if allow_mock else [])
     by_source: dict[str, int] = {}
-    need_ai: list[StoryboardShot] = []
-    for r in todo:
-        hit = None
-        for tier in tiers:
-            hit = _library_pick(db, p, r, used, tier)
-            if hit is not None:
-                src = {"shot": "library", "ai": "library_ai", "seed": "library_seed"}[tier]
-                _use_library(db, r, hit, src)
-                used.add(hit.id)
-                by_source[src] = by_source.get(src, 0) + 1
-                break
-        if hit is None:
-            need_ai.append(r)
-    db.commit()
-
-    ok = sum(by_source.values())
     errors: list[dict] = []
-    if need_ai and not ai_ready:
-        # 4) 没有生图能力：演示模式出占位，生产环境如实报「缺镜头」
-        for r in need_ai:
-            if allow_mock:
-                _placeholder(db, r, p)
-                by_source["placeholder"] = by_source.get("placeholder", 0) + 1
-                ok += 1
-            else:
-                r.status = "rejected"
-                r.error = (f"素材库没有「{_dest_core(p.destination)}」的可用实拍镜头，"
-                           f"且生图模型未就绪（{image_ad.note(provider)}）。请上传素材或配置生图模型")
-                errors.append({"order": r.order, "place": r.place, "error": r.error})
-        db.commit()
-        need_ai = []
-    if on_progress and not need_ai:
-        on_progress(len(todo), len(todo))
-    todo = need_ai
+    need_ai: list[StoryboardShot] = list(todo)
 
+    if not ai_ready:
+        # 生图不可用：退回素材库检索（同一支片内不重复用同一个镜头，PRD F6-6）
+        todo_ids = {r.id for r in todo}
+        used = {r.asset_id for r in shots(db, project_id)
+                if r.asset_id and r.id not in todo_ids and r.status != "rejected"}
+        tiers = ["shot", "ai"] + (["seed"] if allow_mock else [])
+        need_ai = []
+        for r in todo:
+            hit = None
+            for tier in tiers:
+                hit = _library_pick(db, p, r, used, tier)
+                if hit is not None:
+                    src = {"shot": "library", "ai": "library_ai", "seed": "library_seed"}[tier]
+                    _use_library(db, r, hit, src)
+                    used.add(hit.id)
+                    by_source[src] = by_source.get(src, 0) + 1
+                    break
+            if hit is None:
+                if allow_mock:
+                    _placeholder(db, r, p)
+                    by_source["placeholder"] = by_source.get("placeholder", 0) + 1
+                else:
+                    r.status = "rejected"
+                    r.error = (f"素材库没有「{_dest_core(p.destination)}」的可用镜头，"
+                               f"且生图模型未就绪（{image_ad.note(provider)}）。请上传素材或配置生图模型")
+                    errors.append({"order": r.order, "place": r.place, "error": r.error})
+        db.commit()
+
+    # AI 先出分镜
     workers = max(1, min(6, settings().image_concurrency))
 
     def work(row: StoryboardShot):
@@ -376,73 +524,127 @@ def generate(db: Session, project_id: str, *, shot_ids: list[str] | None = None,
         except Exception as e:  # noqa: BLE001
             return row.id, None, f"{type(e).__name__}: {e}"[:300]
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        for n, (rid, res, err) in enumerate(pool.map(work, todo), 1):
-            row = db.get(StoryboardShot, rid)
-            if row is None:
-                continue
-            if err:
-                row.status = "rejected"
-                row.error = err
-                errors.append({"order": row.order, "place": row.place, "error": err})
-            else:
-                img, clip, thumb, note = res
-                if note:
-                    row.note = note
-                row.image_path = str(img)
-                row.clip_path = str(clip)
-                row.provider = provider
-                row.model = image_ad.model_name(provider)
-                row.error = ""
-                a = _asset_for_shot(db, row, p, img=img, clip=clip, thumb=thumb,
-                                    provider=provider)
-                row.asset_id = a.id
-                row.status = "pending"
-                ok += 1
-                by_source[provider] = by_source.get(provider, 0) + 1
-            db.commit()
-            if on_progress:
-                on_progress(n, len(todo))
+    if need_ai:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for n, (rid, res, err) in enumerate(pool.map(work, need_ai), 1):
+                row = db.get(StoryboardShot, rid)
+                if row is None:
+                    continue
+                if err:
+                    row.status = "rejected"
+                    row.error = err
+                    errors.append({"order": row.order, "place": row.place, "error": err})
+                else:
+                    img, clip, thumb, note = res
+                    if note:
+                        row.note = note
+                    row.image_path, row.clip_path = str(img), str(clip)
+                    row.provider, row.model = provider, image_ad.model_name(provider)
+                    row.error = ""
+                    a = _asset_for_shot(db, row, p, img=img, clip=clip, thumb=thumb,
+                                        provider=provider)
+                    row.asset_id = a.id
+                    row.status = "pending"
+                    by_source[provider] = by_source.get(provider, 0) + 1
+                db.commit()
+                if on_progress:
+                    on_progress(n, len(need_ai) + 1)
 
-    total = ok + len(errors)
+    # AI 出不了图的句子不留空卡：素材库 → 借用前一句画面（产品决定，E2E 反馈）
+    for r in todo:
+        if r.status == "rejected" and r.error and _borrow(db, p, r, r.error):
+            by_source["borrowed"] = by_source.get("borrowed", 0) + 1
+            errors = [e for e in errors if e["order"] != r.order]
+    db.commit()
+
+    done = [r for r in todo if r.status == "pending"]
+    # 机器先审：视觉模型打图文一致度，人只看低分的
+    _apply_judge(db, done, p)
+    # AI 画面找可替换的实拍
+    _suggest_real(db, p, done)
+    for r in todo:
+        sync_dups(db, r)
+    db.commit()
+    if on_progress:
+        on_progress(1, 1)
+
+    ok = len(done)
     parts = "，".join(f"{SOURCE_LABEL.get(k, k)} {v}" for k, v in by_source.items())
     return {
-        "ok": ok, "failed": len(errors), "total": total, "errors": errors,
+        "ok": ok, "failed": len(errors), "total": ok + len(errors), "errors": errors,
         "by_source": by_source,
         "provider": provider, "model": image_ad.model_name(provider),
-        "note": f"共 {total} 句：{parts or '无'}" + (f"；失败 {len(errors)}" if errors else ""),
+        "note": f"共 {ok + len(errors)} 句：{parts or '无'}" + (f"；失败 {len(errors)}" if errors else ""),
     }
 
 
 # ------------------------------------------------------------------ 3) 审核
-def approve(db: Session, shot_id: str) -> dict:
+def _master(db: Session, shot_id: str) -> StoryboardShot:
     row = db.get(StoryboardShot, shot_id)
     if row is None:
         raise ProjectError("分镜不存在")
+    if row.dup_of:
+        # 对复唱句的操作一律作用到母句上，保证同一句歌词只有一个画面
+        m = db.execute(select(StoryboardShot).where(
+            StoryboardShot.project_id == row.project_id,
+            StoryboardShot.order == row.dup_of)).scalar_one_or_none()
+        if m is not None:
+            return m
+    return row
+
+
+def approve(db: Session, shot_id: str) -> dict:
+    row = _master(db, shot_id)
     if not row.image_path:
         raise ProjectError("这条还没有图，先出图再通过")
     row.status = "approved"
-    row.note = ""
+    row.error = ""
+    sync_dups(db, row)
     db.commit()
     return {"id": row.id, "status": row.status, "status_label": STATUS_LABEL[row.status]}
+
+
+def approve_suggested(db: Session, project_id: str) -> dict:
+    """一键通过所有「建议通过」（预审分 ≥ SUGGEST_PASS）的句子，低分的留给人看。"""
+    n = 0
+    for r in shots(db, project_id):
+        if not r.dup_of and r.status == "pending" and r.ai_score >= SUGGEST_PASS:
+            r.status = "approved"
+            sync_dups(db, r)
+            n += 1
+    db.commit()
+    return {"approved": n}
 
 
 def reject(db: Session, shot_id: str, note: str = "") -> dict:
-    row = db.get(StoryboardShot, shot_id)
-    if row is None:
-        raise ProjectError("分镜不存在")
+    row = _master(db, shot_id)
     row.status = "rejected"
     row.note = (note or "")[:300]
+    sync_dups(db, row)
     db.commit()
     return {"id": row.id, "status": row.status, "status_label": STATUS_LABEL[row.status]}
+
+
+def use_library(db: Session, shot_id: str, asset_id: str = "") -> dict:
+    """换成素材库实拍（默认用系统推荐的那条）。人主动选的，视为已通过。"""
+    row = _master(db, shot_id)
+    aid = asset_id or row.suggest_asset_id
+    a = db.get(Asset, aid) if aid else None
+    if a is None:
+        raise ProjectError("没有可替换的素材库镜头")
+    src = "library_seed" if a.is_seed else ("library_ai" if a.source == "ai" else "library")
+    row.rev += 1
+    _use_library(db, row, a, src)
+    row.status = "approved"
+    sync_dups(db, row)
+    db.commit()
+    return {"id": row.id, "status": row.status, "image_url": _img_url(row)}
 
 
 def regenerate(db: Session, shot_id: str, *, prompt: str | None = None,
                provider: str | None = None) -> dict:
     """驳回重生成：换一个 rev，产出新文件名（避免同名覆盖 + 缓存取旧图）。"""
-    row = db.get(StoryboardShot, shot_id)
-    if row is None:
-        raise ProjectError("分镜不存在")
+    row = _master(db, shot_id)
     p = get_project(db, row.project_id)
     provider = (provider or row.provider or image_ad.default_provider()).strip().lower()
     if provider not in image_ad.PROVIDERS:
@@ -451,6 +653,7 @@ def regenerate(db: Session, shot_id: str, *, prompt: str | None = None,
         if settings().allow_mock:
             row.rev += 1
             _placeholder(db, row, p)
+            sync_dups(db, row)
             db.commit()
             return {"id": row.id, "status": row.status, "rev": row.rev, "image_url": _img_url(row)}
         raise ProjectError(f"{provider} 未就绪：{image_ad.note(provider)}")
@@ -463,10 +666,24 @@ def regenerate(db: Session, shot_id: str, *, prompt: str | None = None,
     try:
         img, clip, thumb, note = _render_one(row, p, provider)
     except Exception as e:  # noqa: BLE001
-        row.status = "rejected"
-        row.error = f"{type(e).__name__}: {e}"[:300]
+        reason = f"{type(e).__name__}: {e}"[:300]
+        row.rev -= 1      # 新文件没生成出来，回到上一版的文件名
+        if row.image_path and Path(row.image_path).exists():
+            # 重出失败：保留上一版画面，不把卡片变成空的
+            row.status = "pending"
+            row.note = f"重新出图失败，已保留上一版画面（{reason[:60]}）"[:300]
+            row.error = ""
+        elif _borrow(db, p, row, reason):
+            pass
+        else:
+            row.status = "rejected"
+            row.error = reason
+        sync_dups(db, row)
         db.commit()
-        raise ProjectError(f"重生成失败：{row.error}") from e
+        if row.status == "rejected":
+            raise ProjectError(f"重生成失败：{row.error}") from e
+        return {"id": row.id, "status": row.status, "rev": row.rev, "image_url": _img_url(row),
+                "fallback": True, "note": row.note}
     row.image_path, row.clip_path = str(img), str(clip)
     if note:
         row.note = note
@@ -475,15 +692,19 @@ def regenerate(db: Session, shot_id: str, *, prompt: str | None = None,
     row.asset_id = a.id
     row.status = "pending"
     row.error = ""
+    row.ai_score, row.ai_reason = -1, ""
+    db.commit()
+    # 重出的图同样先过机器预审，并重新找可替换的实拍
+    _apply_judge(db, [row], p)
+    _suggest_real(db, p, [row])
+    sync_dups(db, row)
     db.commit()
     return {"id": row.id, "status": row.status, "rev": row.rev, "image_url": _img_url(row)}
 
 
 def upload(db: Session, shot_id: str, filename: str, content: bytes) -> dict:
     """用用户自己提供的图替换（用户对自己上传的图负责，视为已通过）。"""
-    row = db.get(StoryboardShot, shot_id)
-    if row is None:
-        raise ProjectError("分镜不存在")
+    row = _master(db, shot_id)
     if not content:
         raise ProjectError("上传内容为空")
     p = get_project(db, row.project_id)
@@ -511,6 +732,8 @@ def upload(db: Session, shot_id: str, filename: str, content: bytes) -> dict:
     row.status = "approved"
     row.note = f"用户上传：{filename}"[:300]
     row.error = ""
+    row.ai_score, row.ai_reason, row.suggest_asset_id = -1, "", ""
+    sync_dups(db, row)
     db.commit()
     return {"id": row.id, "status": row.status, "image_url": _img_url(row)}
 
@@ -519,9 +742,9 @@ def approve_all(db: Session, project_id: str) -> dict:
     rows = shots(db, project_id)
     n = 0
     for r in rows:
-        if r.image_path and r.status in ("pending", "rejected"):
+        if r.image_path and r.status in ("pending", "rejected") and not r.dup_of:
             r.status = "approved"
-            r.note = ""
+            sync_dups(db, r)
             n += 1
     db.commit()
     return {"approved": n, "total": len(rows)}
@@ -569,18 +792,51 @@ def progress(db: Session, project_id: str) -> dict:
     for r in rows:
         by[r.status] = by.get(r.status, 0) + 1
     done = by.get("approved", 0)
+    masters = [r for r in rows if not r.dup_of]
+    pend = [r for r in masters if r.status == "pending"]
+    with_img = [r for r in rows if r.image_path]
+    ai_n = len([r for r in with_img if r.provider in AI_SOURCES])
     return {
         "total": len(rows), "by_status": by, "approved": done,
         "pending": by.get("pending", 0), "rejected": by.get("rejected", 0),
         "all_approved": bool(rows) and done == len(rows),
+        # —— 审核减负视角：按母句计数（复唱句只审一次）——
+        "unique": len(masters),
+        "unique_approved": len([r for r in masters if r.status == "approved"]),
+        "need_review": len([r for r in pend if r.ai_score < SUGGEST_PASS]),
+        "suggest_pass": len([r for r in pend if r.ai_score >= SUGGEST_PASS]),
+        "suggest_pass_threshold": SUGGEST_PASS,
+        # AI 画面占比只作提醒（产品决定：不硬拦截），按句计（含复唱句，代表成片里的时长占比）
+        "ai_ratio": round(ai_n / len(with_img), 2) if with_img else 0.0,
+        "ai_ratio_limit": 0.3,
+        "replaceable": len([r for r in masters if r.suggest_asset_id]),
     }
 
 
 def payload(db: Session, project_id: str) -> dict:
     rows = shots(db, project_id)
+    dup_count: dict[int, int] = {}
+    for r in rows:
+        if r.dup_of:
+            dup_count[r.dup_of] = dup_count.get(r.dup_of, 0) + 1
+    sug_ids = {r.suggest_asset_id for r in rows if r.suggest_asset_id}
+    sug = {a.id: a for a in db.execute(select(Asset).where(Asset.id.in_(sug_ids))).scalars()} if sug_ids else {}
+    from ..serialize import media_url
+
+    def suggestion(r: StoryboardShot) -> dict | None:
+        a = sug.get(r.suggest_asset_id)
+        if a is None:
+            return None
+        return {"asset_id": a.id, "name": a.name, "licensor": a.licensor, "is_seed": bool(a.is_seed),
+                "thumb_url": media_url("thumbs", a.thumb_path) if a.thumb_path else ""}
+
     items = []
     for r in rows:
         items.append({
+            "dup_of": r.dup_of, "repeats": dup_count.get(r.order, 0),
+            "ai_score": None if r.ai_score < 0 else r.ai_score, "ai_reason": r.ai_reason,
+            "ai_verdict": ("" if r.ai_score < 0 else ("pass" if r.ai_score >= SUGGEST_PASS else "review")),
+            "suggest": suggestion(r),
             "id": r.id, "order": r.order, "section": r.section, "line_no": r.line_no,
             "line_text": r.line_text, "place": r.place, "place_note": r.place_note,
             "keywords": [k for k in (r.keywords or "").split(",") if k.strip()],
@@ -606,6 +862,8 @@ def payload(db: Session, project_id: str) -> dict:
             "providers": image_ad.list_providers(),
             "provider": image_ad.default_provider(),
             "job_active": job_active,
+            # 歌词改过、分镜还是旧的：界面提示重新出图
+            "stale": is_stale(db, project_id),
             "allow_mock": settings().allow_mock}
 
 
@@ -616,6 +874,26 @@ def approved_map(db: Session, project_id: str) -> dict[int, str]:
         if r.status == "approved" and r.asset_id:
             out[r.order] = r.asset_id
     return out
+
+
+def recover_stuck(db: Session) -> int:
+    """服务重启后，「生成中」却没有任务在跑的句子不能一直卡着：有图回到待审，没图标需重做。"""
+    from ..models import Job
+
+    active = {j.project_id for j in db.execute(select(Job).where(
+        Job.type.in_(("storyboard_generate", "storyboard_generate_one")),
+        Job.status.in_(("queued", "running")))).scalars()}
+    n = 0
+    for r in db.execute(select(StoryboardShot).where(StoryboardShot.status == "generating")).scalars():
+        if r.project_id in active:
+            continue
+        if r.image_path and Path(r.image_path).exists():
+            r.status = "pending"
+        else:
+            r.status, r.error = "rejected", "出图任务被中断（服务重启），请重新出图"
+        n += 1
+    db.commit()
+    return n
 
 
 def reset(db: Session, project_id: str) -> dict:

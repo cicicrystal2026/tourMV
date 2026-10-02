@@ -42,7 +42,7 @@ class LyriaAdapter(MusicAdapter):
     @property
     def ready(self) -> bool:
         s = settings()
-        return bool(s.gemini_api_key) and not s.force_mock
+        return bool(s.gemini_api_key) and not (s.force_mock or s.music_force_mock)
 
     def capabilities(self) -> dict:
         return {

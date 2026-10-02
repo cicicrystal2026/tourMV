@@ -260,6 +260,14 @@ class StoryboardShot(IdMixin, TimestampMixin, Base):
     # draft(待生成) → generating → pending(待审核) → approved / rejected
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
     rev: Mapped[int] = mapped_column(Integer, default=0)            # 重生成次数，用于文件名去重
+    # —— PRD V1.1 审核减负 ——
+    # 与第几句歌词重复（副歌复唱）：0 = 本句是「母句」；>0 = 跟随该序号的母句，只审一次
+    dup_of: Mapped[int] = mapped_column(Integer, default=0)
+    # 视觉模型预审：图文一致度 0–100，-1 = 未预审（未配置 / 调用失败，不伪造分数）
+    ai_score: Mapped[int] = mapped_column(Integer, default=-1)
+    ai_reason: Mapped[str] = mapped_column(String(300), default="")
+    # 素材库里可替换的实拍镜头（AI 先出分镜，有实拍再一键换）
+    suggest_asset_id: Mapped[str] = mapped_column(String(36), default="")
     note: Mapped[str] = mapped_column(String(300), default="")      # 驳回理由 / 人工备注
     error: Mapped[str] = mapped_column(Text, default="")
 

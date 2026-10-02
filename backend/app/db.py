@@ -88,6 +88,8 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
                         "audio_token": "VARCHAR(40) DEFAULT ''"},
     "asset": {"source": "VARCHAR(10) DEFAULT 'shot'", "is_seed": "BOOLEAN DEFAULT 0"},
     "trend_card": {"is_seed": "BOOLEAN DEFAULT 0"},
+    "storyboard_shot": {"dup_of": "INTEGER DEFAULT 0", "ai_score": "INTEGER DEFAULT -1",
+                        "ai_reason": "VARCHAR(300) DEFAULT ''", "suggest_asset_id": "VARCHAR(36) DEFAULT ''"},
 }
 
 

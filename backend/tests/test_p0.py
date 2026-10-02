@@ -294,7 +294,8 @@ def test_storyboard_fallback_chain(client, has_real_db):
     assert res["by_source"].get("library_seed", 0) >= 1, "长白山的演示素材应先被素材库匹配到"
     sb = client.get(f"/api/projects/{CHANGBAI}/storyboard").json()
     assert all(it["image_url"] and it["status"] == "pending" for it in sb["items"])
-    lib = [it["asset_id"] for it in sb["items"] if it["source"].startswith("library")]
+    # 复唱句跟随母句（允许同画面）；不同歌词之间不能重复用同一个素材库镜头
+    lib = [it["asset_id"] for it in sb["items"] if it["source"].startswith("library") and not it["dup_of"]]
     assert len(lib) == len(set(lib)), "一支片内同一个素材库镜头不能重复用"
     assert not sb["job_active"]
 
@@ -324,3 +325,135 @@ def test_storyboard_fallback_chain(client, has_real_db):
         assert res["failed"] >= 1 and "素材库没有" in res["errors"][0]["error"]
     finally:
         s.allow_mock = old
+
+
+# ------------------------------------------------------------------ 审核减负：复唱合并 / 建议通过 / 实拍替换
+def test_storyboard_review_assist(client, has_real_db):
+    if not has_real_db:
+        pytest.skip("没有真实库备份")
+    from app.db import SessionLocal
+    from app.models import StoryboardShot
+
+    client.post(f"/api/projects/{CHANGBAI}/storyboard/plan?force=true")
+    r = client.post(f"/api/projects/{CHANGBAI}/storyboard/generate")
+    assert r.status_code == 200, r.text
+    sb = client.get(f"/api/projects/{CHANGBAI}/storyboard").json()
+    prog = sb["progress"]
+    masters = [i for i in sb["items"] if not i["dup_of"]]
+    dups = [i for i in sb["items"] if i["dup_of"]]
+    assert dups, "模板歌词里有复唱句，应被合并"
+    assert prog["unique"] == len(masters) < prog["total"]
+    by_order = {i["order"]: i for i in sb["items"]}
+    for d in dups:
+        m = by_order[d["dup_of"]]
+        assert d["image_url"] == m["image_url"] and d["asset_id"] == m["asset_id"], "复唱句跟随母句画面"
+
+    # 机器预审：Mock 下没有视觉模型 → 不伪造分数
+    assert all(i["ai_score"] is None for i in masters)
+    # 模拟预审结果：高分的「一键通过建议」，低分的留给人
+    with SessionLocal() as db:
+        rows = db.query(StoryboardShot).filter(StoryboardShot.project_id == CHANGBAI,
+                                               StoryboardShot.dup_of == 0).order_by(StoryboardShot.order).all()
+        rows[0].ai_score, rows[1].ai_score = 90, 40
+        db.commit()
+        m0, m1 = rows[0].id, rows[1].id
+    prog = client.get(f"/api/projects/{CHANGBAI}/storyboard").json()["progress"]
+    assert prog["suggest_pass"] >= 1 and prog["need_review"] >= 1
+    r = client.post(f"/api/projects/{CHANGBAI}/storyboard/approve-suggested")
+    assert r.json()["approved"] == 1
+    items = {i["id"]: i for i in client.get(f"/api/projects/{CHANGBAI}/storyboard").json()["items"]}
+    assert items[m0]["status"] == "approved" and items[m1]["status"] == "pending"
+
+    # 对复唱句操作 = 对母句操作，并同步回所有复唱句
+    d = dups[0]
+    assert client.post(f"/api/projects/{CHANGBAI}/storyboard/shots/{d['id']}/approve").status_code == 200
+    items = client.get(f"/api/projects/{CHANGBAI}/storyboard").json()["items"]
+    same = [i for i in items if i["order"] == d["dup_of"] or i["dup_of"] == d["dup_of"]]
+    assert all(i["status"] == "approved" for i in same)
+
+    # 有实拍可替换：手动挂一个推荐，一键换上
+    with SessionLocal() as db:
+        from app.models import Asset
+        seed = db.query(Asset).filter(Asset.is_seed.is_(True), Asset.destination.like("%长白山%")).first()
+        row = db.get(StoryboardShot, m1)
+        row.suggest_asset_id = seed.id
+        db.commit()
+    r = client.post(f"/api/projects/{CHANGBAI}/storyboard/shots/{m1}/use-library")
+    assert r.status_code == 200, r.text
+    it = {i["id"]: i for i in client.get(f"/api/projects/{CHANGBAI}/storyboard").json()["items"]}[m1]
+    assert it["status"] == "approved" and it["source"] == "library_seed" and it["suggest"] is None
+
+
+def test_storyboard_stale_after_lyric_change(client, has_real_db):
+    """回归（E2E 发现）：驳回重写歌词后，旧分镜不能沿用，闸门要拦。"""
+    if not has_real_db:
+        pytest.skip("没有真实库备份")
+    from app.db import SessionLocal
+    from app.gates import check
+    from app.models import LyricVersion, Project, StoryboardShot
+
+    client.post(f"/api/projects/{CHANGBAI}/storyboard/plan?force=true")
+    client.post(f"/api/projects/{CHANGBAI}/storyboard/generate")
+    with SessionLocal() as db:
+        for r in db.query(StoryboardShot).filter(StoryboardShot.project_id == CHANGBAI):
+            r.status = "approved"
+        ver = db.query(LyricVersion).filter(LyricVersion.project_id == CHANGBAI)             .order_by(LyricVersion.version.desc()).first()
+        db.add(LyricVersion(project_id=CHANGBAI, version=ver.version + 1, checks_done=True,
+                            sections=[{"name": "主歌1", "lines": ["天池静卧云海间", "岳桦林在风里弯成弓"]}]))
+        p = db.get(Project, CHANGBAI)
+        p.status = "storyboard_review"
+        db.commit()
+    sb = client.get(f"/api/projects/{CHANGBAI}/storyboard").json()
+    assert sb["stale"]
+    with SessionLocal() as db:
+        g = check(db, db.get(Project, CHANGBAI))
+    assert not g.ok and any("旧歌词" in x for x in g.reasons)
+    # 再次出图会按新歌词重新提炼
+    r = client.post(f"/api/projects/{CHANGBAI}/storyboard/generate")
+    assert r.status_code == 200, r.text
+    sb = client.get(f"/api/projects/{CHANGBAI}/storyboard").json()
+    assert not sb["stale"] and [i["line_text"] for i in sb["items"]] == ["天池静卧云海间", "岳桦林在风里弯成弓"]
+
+
+def test_ai_failure_borrows_previous_shot(client, has_real_db, monkeypatch):
+    """AI 出不了图时不留空卡：借用前一句画面（产品决定，E2E 反馈）。"""
+    if not has_real_db:
+        pytest.skip("没有真实库备份")
+    from app.db import SessionLocal
+    from app.models import Asset, StoryboardShot
+    from app.services import storyboard as sbs
+
+    client.post(f"/api/projects/{CHANGBAI}/storyboard/plan?force=true")
+    client.post(f"/api/projects/{CHANGBAI}/storyboard/generate")     # 先让各句都有画面（占位）
+    with SessionLocal() as db:
+        # 关掉素材库兜底，逼它走「借前一句」
+        for a in db.query(Asset).filter(Asset.destination.like("%长白山%")):
+            a.usable = False
+        rows = db.query(StoryboardShot).filter(StoryboardShot.project_id == CHANGBAI,
+                                               StoryboardShot.dup_of == 0).order_by(StoryboardShot.order).all()
+        victim = rows[1]
+        victim.image_path, victim.clip_path, victim.asset_id, victim.status = "", "", "", "rejected"
+        db.commit()
+        vid, prev_order = victim.id, rows[0].order
+
+    def boom(*a, **k):
+        raise RuntimeError("CalledProcessError: ffmpeg 转码失败")
+    monkeypatch.setattr(sbs.image_ad, "available", lambda *a, **k: True)
+    monkeypatch.setattr(sbs, "_render_one", boom)
+    try:
+        r = client.post(f"/api/projects/{CHANGBAI}/storyboard/generate")
+        assert r.status_code == 200, r.text
+        it = {i["id"]: i for i in client.get(f"/api/projects/{CHANGBAI}/storyboard").json()["items"]}[vid]
+        assert it["image_url"] and it["source"] == "borrowed" and it["status"] == "pending"
+        assert f"第 {prev_order} 句" in it["note"]
+
+        # 单张重出失败：保留现有画面，不变空
+        with SessionLocal() as db:
+            sbs.regenerate(db, vid)
+        it = {i["id"]: i for i in client.get(f"/api/projects/{CHANGBAI}/storyboard").json()["items"]}[vid]
+        assert it["image_url"] and it["status"] == "pending"
+    finally:
+        with SessionLocal() as db:
+            for a in db.query(Asset).filter(Asset.destination.like("%长白山%")):
+                a.usable = True
+            db.commit()

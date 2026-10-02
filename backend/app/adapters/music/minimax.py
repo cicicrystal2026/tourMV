@@ -52,7 +52,7 @@ class MiniMaxAdapter(MusicAdapter):
 
     @property
     def ready(self) -> bool:
-        return self.mode != "none" and not settings().force_mock
+        return self.mode != "none" and not (settings().force_mock or settings().music_force_mock)
 
     @property
     def run_mode(self) -> str:
