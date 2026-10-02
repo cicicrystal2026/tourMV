@@ -457,3 +457,52 @@ def test_ai_failure_borrows_previous_shot(client, has_real_db, monkeypatch):
             for a in db.query(Asset).filter(Asset.destination.like("%长白山%")):
                 a.usable = True
             db.commit()
+
+
+# ------------------------------------------------------------------ 出片：短版窗口 + 自检 + AI 字卡
+def test_short_window_and_qc():
+    from types import SimpleNamespace
+    from app.services import render as R
+
+    tl = SimpleNamespace(duration_s=169.4, lyric_lines=[
+        {"section": "主歌1", "start_s": 5}, {"section": "副歌", "start_s": 45}])
+    start, span = R.short_window(tl)
+    assert 150 <= span <= 170 and start + span <= 169.4 + 0.01, (start, span)
+    # V1.0 的算法会得到 124 秒（169-45），短版不达标
+    assert span > 169.4 - 45
+
+    tl2 = SimpleNamespace(duration_s=300, lyric_lines=[{"section": "副歌", "start_s": 60}])
+    assert R.short_window(tl2) == (60.0, 170.0)
+    tl3 = SimpleNamespace(duration_s=120, lyric_lines=[{"section": "副歌", "start_s": 30}])
+    assert R.short_window(tl3) == (0.0, 120.0), "整首不足 150 秒就整首，自检会如实报不达标"
+
+
+def test_render_short_end_to_end(tmp_path):
+    """真跑 ffmpeg：短版画面与音频同起点、时长达标、带 AI 字卡、自检通过。"""
+    from types import SimpleNamespace
+
+    from app.adapters import media
+    from app.services import render as R
+    from app.services.music import _rating_of  # noqa: F401  确保模块可导入
+
+    # 造 3 段 70 秒的片段 + 一条 200 秒的音频
+    clips = []
+    for i in range(3):
+        c = tmp_path / f"c{i}.mp4"
+        media.generate_test_clip(c, seconds=70, width=640, height=360, label=f"seg{i}")
+        clips.append(c)
+    audio = tmp_path / "a.mp3"
+    media.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=200",
+               str(audio)])
+    job = SimpleNamespace(output_path=str(tmp_path / "out.mp4"))
+    # 直接用 quality_check 校验一个手工合成的 160 秒成片
+    media.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(clips[0]), "-i", str(audio),
+               "-vf", "loop=-1:size=1750,scale=1080:1920", "-t", "160", "-map", "0:v", "-map", "1:a",
+               "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", job.output_path], timeout=600)
+    qc = R.quality_check(job, R.VARIANTS["short"], expect_s=160, short=True, sub_lines=12,
+                         need_ai_card=True, ai_card=True)
+    assert qc["ok"], qc
+    bad = R.quality_check(job, R.VARIANTS["landscape"], expect_s=169, short=False, sub_lines=0,
+                          need_ai_card=True, ai_card=False)
+    names = {c["name"] for c in bad["checks"] if not c["ok"]}
+    assert {"时长", "分辨率", "字幕", "AI 字卡"} <= names

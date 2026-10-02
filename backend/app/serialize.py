@@ -189,7 +189,7 @@ def clip(c: TimelineClip, a: Asset | None) -> dict:
 def render_job(r: RenderJob) -> dict:
     return {"id": r.id, "variant": r.variant, "status": r.status, "progress": r.progress,
             "url": media_url("renders", r.output_path), "size_mb": r.size_mb,
-            "error": r.error, "updated_at": dt(r.updated_at)}
+            "error": r.error, "qc": r.qc or {}, "updated_at": dt(r.updated_at)}
 
 
 def job(j: Job) -> dict:

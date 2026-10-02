@@ -309,7 +309,7 @@ def h_render_all(ctx: JobContext) -> None:
     pid = ctx.job().project_id
     variants = ctx.job().payload.get("variants") or list(render_svc.VARIANTS)
     variants = [v for v in variants if v in render_svc.VARIANTS] or list(render_svc.VARIANTS)
-    done, failed = [], []
+    done, failed, qc_failed = [], [], []
     for i, v in enumerate(variants):
         base = int(100 * i / len(variants))
         ctx.progress(base, f"合成 {render_svc.VARIANTS[v]['label']}")
@@ -318,10 +318,20 @@ def h_render_all(ctx: JobContext) -> None:
             progress=lambda p, b=base: ctx.progress(min(99, b + int(p * 0.2)), None),
         )
         (done if job.status == "done" else failed).append(v)
-    ctx.set_result({"done": done, "failed": failed})
-    if failed:
-        raise RuntimeError(f"部分版本合成失败：{failed}")
-    # 只有全部版本都合成成功才推进到「已交付」，避免失败也标记为交付完成
+        if job.status == "done" and not (job.qc or {}).get("ok", True):
+            bad = "、".join(c["name"] for c in job.qc.get("checks", []) if not c["ok"])
+            qc_failed.append(f"{render_svc.VARIANTS[v]['label']}：{bad}")
+    ctx.set_result({"done": done, "failed": failed, "qc_failed": qc_failed})
+    if failed or qc_failed:
+        # 合成失败或出片自检不通过：不交付，退回「待精剪」并写明原因（PRD V1.1 F3-10），
+        # 而不是停在「合成中」让人以为还在跑
+        p = ctx.db.get(Project, pid)
+        if p is not None and p.status == "rendering":
+            reason = "；".join(([f"合成失败：{'、'.join(failed)}"] if failed else []) + qc_failed)
+            p.status, p.status_note = "edit_review", f"出片未通过：{reason}"[:300]
+            ctx.db.commit()
+        raise RuntimeError(f"出片未通过：failed={failed} qc={qc_failed}")
+    # 全部版本合成成功且自检通过才推进到「已交付」
     _advance_if(ctx.db, pid, "rendering", "delivered")
 
 

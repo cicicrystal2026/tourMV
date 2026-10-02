@@ -491,6 +491,25 @@ export default function EditPage() {
                             </a>
                             <span className="text-[10px] text-ink-faint ml-auto">{relative(r.updated_at)}</span>
                           </div>
+                          {/* 出片自检（PRD V1.1 F3-10）：不通过就不交付 */}
+                          {r.qc?.checks?.length > 0 && (
+                            <div className="mt-2 flex flex-wrap gap-1">
+                              {r.qc.checks.map((c: any) => (
+                                <span
+                                  key={c.name}
+                                  className={c.ok ? 'tag' : 'tag-human'}
+                                  title={c.detail}
+                                >
+                                  {c.ok ? '✓' : '✗'} {c.name}
+                                </span>
+                              ))}
+                              {!r.qc.ok && (
+                                <div className="w-full text-[10px] text-human-dark mt-1">
+                                  {r.qc.checks.filter((c: any) => !c.ok).map((c: any) => `${c.name}：${c.detail}`).join('；')}
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </>
                       )}
                       {r.status === 'failed' && (

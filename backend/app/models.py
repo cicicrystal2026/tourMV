@@ -328,6 +328,8 @@ class RenderJob(IdMixin, TimestampMixin, Base):
     output_path: Mapped[str] = mapped_column(String(500), default="")
     size_mb: Mapped[float] = mapped_column(Float, default=0.0)
     error: Mapped[str] = mapped_column(Text, default="")
+    # 出片自检（PRD V1.1 F3-10）：{"ok": bool, "checks": [{"name","ok","detail"}]}
+    qc: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 # --------------------------------------------------------------------- 任务队列

@@ -30,6 +30,12 @@ VARIANTS = {
     "clean": {"label": "横版 1920×1080 · 无字幕（供二次剪辑）", "w": 1920, "h": 1080, "subs": None},
 }
 
+# 短版规格（PRD F3-8）：2:30–2:50
+SHORT_MIN_S, SHORT_MAX_S = 150.0, 170.0
+# 含 AI 画面的成片，片尾字卡（PRD V1.1 §7.3）
+AI_CARD_TEXT = "含 AI 生成画面 · Contains AI-generated visuals"
+AI_CARD_SECONDS = 3.5
+
 # 历史版本号 → 现在的等价版本。
 # sub_zh 曾经是「横版 + 中文字幕」，与现在的 landscape 完全等价 ——
 # 老项目里还留着这个 key 的成片记录，展示时按 landscape 的标签显示，不要出现裸 key。
@@ -188,6 +194,71 @@ def _clip_sources(db: Session, tl: Timeline) -> list[tuple[Path, float, float, f
     return out
 
 
+def short_window(tl: Timeline) -> tuple[float, float]:
+    """短版截取窗口 (起点, 时长)。
+
+    V1.0 的问题：音频从副歌起点开始，**画面却从第一个镜头开始**，音画错位；
+    时长又按「副歌起点到结尾」算，169 秒的歌只剩 2:03，达不到 2:30–2:50。
+    现在：时长取 150–170 秒（歌本身不够长就整首），尽量从第一段副歌起，
+    放不下就往前挪，保证窗口落在整首歌之内。
+    """
+    dur = float(tl.duration_s or 0)
+    span = min(SHORT_MAX_S, dur) if dur >= SHORT_MIN_S else dur
+    chorus = next((l for l in (tl.lyric_lines or []) if "副歌" in (l.get("section") or "")), None)
+    start = float(chorus["start_s"]) if chorus else 0.0
+    start = max(0.0, min(start, dur - span))
+    return round(start, 3), round(span, 3)
+
+
+def _has_ai_shots(db: Session, tl: Timeline) -> bool:
+    ids = {c.asset_id for c in db.execute(
+        select(TimelineClip).where(TimelineClip.timeline_id == tl.id)).scalars() if c.asset_id}
+    if not ids:
+        return False
+    return any(a.source == "ai" or (a.licensor or "").startswith("AI 生成")
+               for a in db.execute(select(Asset).where(Asset.id.in_(ids))).scalars())
+
+
+def _ai_card_filter(span: float) -> str:
+    font = media.cjk_fontfile()
+    fontarg = f"fontfile='{esc_filter_path(font)}':" if font else ""
+    t0 = max(0.0, span - AI_CARD_SECONDS)
+    return (f"drawbox=y=ih*0.42:w=iw:h=ih*0.16:color=black@0.55:t=fill:enable='gte(t,{t0:.2f})',"
+            f"drawtext={fontarg}text='{AI_CARD_TEXT}':fontcolor=white:fontsize=h*0.032:"
+            f"x=(w-text_w)/2:y=(h-text_h)/2:enable='gte(t,{t0:.2f})'")
+
+
+def quality_check(job: RenderJob, cfg: dict, *, expect_s: float, short: bool,
+                  sub_lines: int, need_ai_card: bool, ai_card: bool) -> dict:
+    """出片自检（PRD V1.1 F3-10）：时长与规格、音轨、字幕、AI 字卡。
+
+    字幕检查目前核的是「字幕文件里确有逐句歌词且已压制」，没有做抽帧 OCR ——
+    OCR 依赖较重，留到真实能力（W3）一起接；这一点在界面上如实说明。
+    """
+    info = media.probe(job.output_path) if job.output_path else {}
+    checks: list[dict] = []
+
+    def add(name: str, ok: bool, detail: str) -> None:
+        checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+    d = float(info.get("duration_s") or 0)
+    if short:
+        lo, hi = (SHORT_MIN_S, SHORT_MAX_S) if expect_s >= SHORT_MIN_S else (expect_s - 1.5, expect_s + 1.5)
+        add("时长", lo - 0.5 <= d <= hi + 0.5,
+            f"{d:.1f} 秒（短版要求 {int(SHORT_MIN_S)}–{int(SHORT_MAX_S)} 秒）"
+            + ("；整首歌不足 150 秒，无法满足短版规格" if expect_s < SHORT_MIN_S else ""))
+    else:
+        add("时长", abs(d - expect_s) <= 1.5, f"{d:.1f} 秒（音频 {expect_s:.1f} 秒）")
+    w, h = int(info.get("width") or 0), int(info.get("height") or 0)
+    add("分辨率", (w, h) == (cfg["w"], cfg["h"]), f"{w}×{h}（要求 {cfg['w']}×{cfg['h']}）")
+    add("音轨", bool(info.get("has_audio")), "有" if info.get("has_audio") else "成片没有音轨")
+    if cfg.get("subs"):
+        add("字幕", sub_lines > 0, f"已压制 {sub_lines} 句歌词字幕" if sub_lines else "没有可压制的歌词字幕")
+    if need_ai_card:
+        add("AI 字卡", ai_card, "片尾已加「含 AI 生成画面」" if ai_card else "含 AI 画面但缺片尾字卡")
+    return {"ok": all(c["ok"] for c in checks), "checks": checks}
+
+
 def render_variant(db: Session, project_id: str, variant: str, progress=None) -> RenderJob:
     cfg = VARIANTS.get(variant)
     if cfg is None:
@@ -206,6 +277,7 @@ def render_variant(db: Session, project_id: str, variant: str, progress=None) ->
     job.status = "running"
     job.progress = 2
     job.error = ""
+    job.qc = {}
     db.commit()
 
     # 规整片段放在系统临时目录，按 (项目, 版本) 固定命名：
@@ -220,12 +292,12 @@ def render_variant(db: Session, project_id: str, variant: str, progress=None) ->
 
         offset = 0.0
         if cfg.get("short"):
-            chorus = next((l for l in (tl.lyric_lines or []) if "副歌" in (l.get("section") or "")), None)
-            offset = float(chorus["start_s"]) if chorus else max(0.0, (tl.duration_s or 160) - 165)
-            offset = min(offset, max(0.0, float(tl.duration_s or 165) - 30))
-            span = min(170.0, max(60.0, float(tl.duration_s or 165) - offset))
+            offset, span = short_window(tl)
         else:
             span = float(tl.duration_s or 0)
+        has_ai = _has_ai_shots(db, tl)
+        # 二剪用的无字幕版不加字卡（二剪成片由剪辑方自行加注），其余版本含 AI 画面就加
+        want_card = has_ai and variant != "clean"
 
         # 阶段一：规整片段
         segs: list[Path] = []
@@ -253,8 +325,11 @@ def render_variant(db: Session, project_id: str, variant: str, progress=None) ->
         # 桂林重渲染后，沙箱回源拿到的还是上一版 1.9MB，CDN 直连才是新的 15.6MB）。
         stem = f"{p.name[:20]}_{variant}_v{tl.auto_version}"
         out = settings().data_dir / "renders" / f"{stem}.mp4"
-        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-               "-f", "concat", "-safe", "0", "-i", str(concat_list)]
+        # 画面与音频必须从同一个起点截：短版两路输入都 -ss 到窗口起点（V1.0 只截了音频）
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+        if offset > 0:
+            cmd += ["-ss", f"{offset:.3f}"]
+        cmd += ["-f", "concat", "-safe", "0", "-i", str(concat_list)]
 
         audio = Path(tl.audio_path) if tl.audio_path else None
         has_audio = audio is not None and audio.exists()
@@ -262,15 +337,17 @@ def render_variant(db: Session, project_id: str, variant: str, progress=None) ->
             cmd += ["-ss", f"{offset:.3f}", "-i", str(audio)]
 
         lines = [l for l in (tl.lyric_lines or [])
-                 if float(l.get("end_s", 0)) > offset]
+                 if float(l.get("end_s", 0)) > offset and float(l.get("start_s", 0)) < offset + span]
         vf = None
+        sub_lines = 0
         if cfg.get("subs") and lines:
             en = _translate([l["text"] for l in lines], p.id) if cfg["subs"] == "zh_en" else None
             ass = work / "subs.ass"
             ass.write_text(build_ass(lines, en, cfg["w"], cfg["h"], offset), encoding="utf-8")
             vf = f"subtitles=filename='{esc_filter_path(ass)}'"
-        if cfg.get("short"):
-            vf = (vf + "," if vf else "") + f"trim=start=0:end={span:.3f},setpts=PTS-STARTPTS"
+            sub_lines = len(lines)
+        if want_card:
+            vf = (vf + "," if vf else "") + _ai_card_filter(span)
 
         if vf:
             cmd += ["-vf", vf]
@@ -282,7 +359,7 @@ def render_variant(db: Session, project_id: str, variant: str, progress=None) ->
         # 一条 3 分钟的片子 5 个版本，差额是 80MB 级，直接决定能不能发布出去。
         cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
                 "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
-        cmd += (["-t", f"{span:.3f}"] if cfg.get("short") else ["-shortest"])
+        cmd += ["-t", f"{span:.3f}"] if cfg.get("short") else ["-shortest"]
         cmd += [str(out)]
         subprocess.run(cmd, capture_output=True, timeout=3600, check=True)
 
@@ -302,6 +379,10 @@ def render_variant(db: Session, project_id: str, variant: str, progress=None) ->
 
         job.output_path = str(out)
         job.size_mb = round(out.stat().st_size / 1024 / 1024, 2) if out.exists() else 0.0
+        audio_s = float(media.probe(audio).get("duration_s") or 0) if has_audio else 0.0
+        expect = span if cfg.get("short") else (min(span, audio_s) if audio_s else span)
+        job.qc = quality_check(job, cfg, expect_s=expect, short=bool(cfg.get("short")),
+                               sub_lines=sub_lines, need_ai_card=want_card, ai_card=want_card)
         job.status = "done"
         job.progress = 100
         db.commit()
