@@ -292,6 +292,12 @@ export default function EditPage() {
       </div>
 
       <div className="p-6 flex flex-col gap-4">
+        {detail.music_is_mock && (
+          <Banner tone="warn">
+            本片的音乐是<b>占位音频</b>（模型未配置或测试环境禁用了真实生曲），听起来是单调的嗡嗡声，不是真实歌曲，不能用于投放。
+            需要真实音乐请回到词曲工作台，用已配置的音乐模型重新生成并选定。
+          </Banner>
+        )}
         {err && (
           <Banner tone="error" onClose={() => setErr('')}>
             {err}

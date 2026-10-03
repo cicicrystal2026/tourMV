@@ -85,7 +85,15 @@ def project_detail(project_id: str, db: Session = Depends(get_db)) -> dict:
         "gate": d["gate"],
         # 是否允许占位（mock）结果参与选定：生产环境为 False
         "allow_mock": settings().allow_mock,
+        # 选定的曲目是不是占位音频（测试环境里成片会是「嗡嗡声」，界面要明确提示）
+        "music_is_mock": _selected_is_mock(db, d["project"]),
     }
+
+
+def _selected_is_mock(db: Session, p) -> bool:
+    from ..models import MusicCandidate
+    c = db.get(MusicCandidate, p.selected_candidate_id) if p.selected_candidate_id else None
+    return bool(c and c.is_mock)
 
 
 @router.post("/projects/{project_id}/advance")
