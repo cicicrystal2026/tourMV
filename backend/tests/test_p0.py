@@ -716,3 +716,52 @@ def test_revision_reuses_music_when_lyrics_unchanged(client, has_real_db, monkey
         assert c is not None and c.audio_path == src_audio and c.cost == 0
         out = P.advance(db, p.id)
         assert out["status"] == "music_review" and out["dispatched"] == "reuse_music"
+
+
+def test_rhyme_rule_and_llm_error_text():
+    """规则押韵按韵母比（儿化取前一字），上游欠费等错误要翻成人话。"""
+    from app.adapters.llm import explain_error
+    from app.services.prompts import check_fallback, rhyme_key
+
+    assert rhyme_key("云在塔上 停了一会儿") == rhyme_key("天边的云 慢慢地飞")      # 会/飞 都是 ei
+    assert rhyme_key("山脊上的光 落在肩上") == rhyme_key("檐角的铜铃 还在响")       # 上/响 都是 ang
+    assert rhyme_key("灯火把夜晚 烫出一个洞") == rhyme_key("风吹过 山顶")            # ong/ing 同辙
+    secs = [{"name": "主歌1", "lines": ["一行", "山脊上的光 落在肩上", "三行", "檐角的铜铃 还在响"]},
+            {"name": "副歌", "lines": ["月光照在 河面上", "我们一起 慢慢唱"]}]
+    assert not [i for i in check_fallback(secs, "x")["issues"] if i["type"] == "rhyme"]
+
+    msg = explain_error(400, '{"error":{"code":"Arrearage","message":"Access denied"}}')
+    assert "欠费" in msg and "Arrearage" in msg
+
+
+def test_mock_lyrics_blocked_and_repeats_merged(client, has_real_db, monkeypatch):
+    """LLM 已配置却失败 → 模板歌词标 mock、闸门拦住；副歌复唱同一句只出一条检查。"""
+    if not has_real_db:
+        pytest.skip("没有真实库备份")
+    from app import gates
+    from app.config import settings
+    from app.db import SessionLocal
+    from app.models import LyricCheck, LyricVersion, Project
+    from app.services import lyrics as L
+
+    with SessionLocal() as db:
+        p = Project(name="测试·模板歌词", destination="杭州·西湖", status="lyric_review")
+        db.add(p)
+        db.flush()
+        ver = LyricVersion(project_id=p.id, version=1, source="mock", checks_done=True, sections=[
+            {"name": "副歌", "lines": ["把杭州西湖的风 装进我的口袋还要更长一点", "第二行是正常长度的歌词"]},
+            {"name": "尾副歌", "lines": ["把杭州西湖的风 装进我的口袋还要更长一点"]}])
+        db.add(ver)
+        db.commit()
+        monkeypatch.setattr(type(settings()), "llm_ready", property(lambda s: True))
+        g = gates.check(db, p)
+        assert not g.ok and any("模板占位" in r for r in g.reasons)
+
+        monkeypatch.setattr(L.llm, "json_chat", lambda *a, **k: ({"issues": [], "items": []}, True))
+        L.run_checks(db, ver)
+        meter = [c for c in db.query(LyricCheck).filter(LyricCheck.lyric_version_id == ver.id) if c.type == "meter"]
+        assert len(meter) == 1 and "处理一次全部生效" in meter[0].evidence
+        db.query(LyricCheck).filter(LyricCheck.lyric_version_id == ver.id).delete()
+        db.delete(ver)
+        db.delete(p)
+        db.commit()

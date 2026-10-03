@@ -22,3 +22,4 @@ numpy>=1.26
 faster-whisper>=1.1
 # 繁简归一化：Whisper 的中文输出常是繁体，不转换会让字符匹配大面积落空
 opencc-python-reimplemented>=0.1.7
+pypinyin>=0.50          # 规则押韵检查按韵母比较

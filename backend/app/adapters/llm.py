@@ -54,13 +54,15 @@ class LLMAdapter:
                     **({"response_format": {"type": "json_object"}} if json_mode else {}),
                 },
             )
-            r.raise_for_status()
+            if r.status_code >= 400:
+                raise RuntimeError(explain_error(r.status_code, r.text))
             content = r.json()["choices"][0]["message"]["content"]
             record(kind="llm", provider=self.provider, model=self.model, purpose=purpose,
                    params={"messages": len(messages)}, status="ok",
                    elapsed_s=time.time() - t0, project_id=project_id)
             return content
         except Exception as e:
+            self.last_error = str(e)[:300]
             record(kind="llm", provider=self.provider, model=self.model, purpose=purpose,
                    status="error", elapsed_s=time.time() - t0, error=str(e), project_id=project_id)
             raise
@@ -78,4 +80,31 @@ class LLMAdapter:
             return (fallback or {}), False
 
 
+def explain_error(status: int, text: str) -> str:
+    """把上游错误翻成运营看得懂的话，同时保留原始错误码便于排查。
+
+    V1.0 只记了「400 Client Error: Bad Request」，实际原因是阿里云百炼账户欠费（Arrearage），
+    系统悄悄换成模板歌词，页面上看不出任何异常。
+    """
+    import json as _json
+
+    code, msg = "", text[:200]
+    try:
+        err = (_json.loads(text) or {}).get("error") or {}
+        code, msg = str(err.get("code") or err.get("type") or ""), str(err.get("message") or msg)
+    except ValueError:
+        pass
+    hint = {
+        "Arrearage": "阿里云百炼（DashScope）账户欠费，请到阿里云控制台充值后重试",
+        "InvalidApiKey": "API Key 无效，请检查 .env 里的 LLM_API_KEY",
+        "invalid_api_key": "API Key 无效，请检查 .env 里的 LLM_API_KEY",
+        "Throttling": "调用太频繁被限流，请稍后重试",
+        "DataInspectionFailed": "内容被平台安全审核拦截，请调整简报或歌词后重试",
+    }.get(code) or ("API Key 无效或无权限" if status in (401, 403) else "")
+    head = f"{hint}（" if hint else ""
+    tail = "）" if hint else ""
+    return f"{head}HTTP {status} {code}: {msg[:160]}{tail}"
+
+
 llm = LLMAdapter()
+llm.last_error = ""

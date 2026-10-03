@@ -143,6 +143,34 @@ def meter_fix_messages(items: list[dict], destination: str) -> list[dict]:
             {"role": "user", "content": f"目的地：{destination}\n需要改写的行：\n{body}"}]
 
 
+_PUNCT_TAIL = "，。、；：！？,.!?;:·…—-“”\"'（）() "
+# 近韵合并（十三辙的粗略版）：eng/ing/ong 同辙、en/in/un 同辙
+_RHYME_GROUP = {"ing": "eng", "ong": "eng", "in": "en", "un": "en", "vn": "en", "ui": "ei"}
+
+
+def _tail_char(line: str) -> str:
+    t = (line or "").rstrip(_PUNCT_TAIL)
+    if len(t) > 1 and t[-1] == "儿":     # 儿化：「一会儿」的韵落在「会」上
+        t = t[:-1]
+    return t[-1] if t else ""
+
+
+def rhyme_key(line: str) -> str:
+    """句尾字的韵（去介音 i/u/ü 后的韵母，近韵合并）。没有 pypinyin 时退化为句尾字本身。"""
+    ch = _tail_char(line)
+    if not ch:
+        return ""
+    try:
+        from pypinyin import Style, pinyin
+    except ImportError:
+        return ch
+    f = pinyin(ch, style=Style.FINALS, strict=False)[0][0] or ch
+    # 去介音（ian→an、uang→ang、iong→ong），但 in/ing/un/ui 这类本身就是韵母的不动
+    if len(f) > 1 and f[0] in "iuv" and any(c in "aeiouv" for c in f[1:]) and f not in ("ui", "iu"):
+        f = f[1:]
+    return _RHYME_GROUP.get(f, f)
+
+
 _PLACE_WORDS = ["塔", "寺", "桥", "城墙", "古道", "码头", "书院", "牌坊", "码头", "石窟"]
 _FACT_MARKERS = ["年", "代", "千", "百", "第一", "最"]
 
@@ -163,13 +191,15 @@ def check_fallback(sections: list[dict], destination: str) -> dict:
     # rhyme：取副歌各行尾字作为基准韵（只提示，不自动改）
     chorus = [ln for n, _, ln in all_lines if "副歌" in n]
     if chorus:
-        tails = [ln.strip()[-1] for ln in chorus if ln.strip()]
-        base = max(set(tails), key=tails.count) if tails else ""
+        keys = [rhyme_key(ln) for ln in chorus if ln.strip()]
+        base = max(set(keys), key=keys.count) if keys else ""
+        # 中文歌押韵本来就常隔句押（偶数句押韵），只检查段落里的偶数句，不逐句要求
         for name, i, ln in all_lines:
-            if base and ln.strip() and ln.strip()[-1] != base and name in ("主歌1", "主歌2", "预副歌"):
+            if (base and ln.strip() and i % 2 == 0 and name in ("主歌1", "主歌2", "预副歌")
+                    and rhyme_key(ln) != base):
                 issues.append({
                     "type": "rhyme", "section": name, "line_no": i, "text": ln,
-                    "evidence": f"副歌基准韵脚为「{base}」，本行句尾「{ln.strip()[-1]}」（规则检查，供参考）",
+                    "evidence": f"副歌主韵为「{base}」，本行句尾「{_tail_char(ln)}」不押（规则检查，供参考）",
                     "suggestions": [],
                 })
 

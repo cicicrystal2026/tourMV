@@ -80,14 +80,14 @@ def generate(db: Session, project_id: str) -> tuple[LyricVersion, bool]:
     )
     if not real and not settings().allow_mock:
         # 模板歌词（「我想带你去××」）一旦混进样片就是事故，生产环境宁可失败
-        raise ProjectError("LLM 调用失败，未生成歌词（生产环境不使用模板占位歌词），请稍后重试")
+        raise ProjectError(f"LLM 调用失败，未生成歌词：{llm.last_error or '未知原因'}")
     sections = payload.get("sections") or prompts.lyrics_fallback(p.destination, mood)["sections"]
 
     if brief is not None:
         brief.kb_refs = kb_ids      # 记录这一版写词引用了哪些已核实条目
     prev = latest(db, p.id)
     ver = LyricVersion(project_id=p.id, version=(prev.version + 1) if prev else 1,
-                       sections=sections, source="ai", checks_done=False)
+                       sections=sections, source="ai" if real else "mock", checks_done=False)
     db.add(ver)
     db.commit()
     db.refresh(ver)
@@ -176,14 +176,21 @@ def run_checks(db: Session, ver: LyricVersion, real: bool = True) -> list[LyricC
                        "evidence": str(it.get("evidence") or ""), "kb": cited,
                        "suggestions": _filter(it.get("suggestions") or [], actual)})
 
-    # 同一行同一类型只留一条
-    seen: set[tuple] = set()
+    # 同一句话同一类型只留一条：副歌复唱的句子文本完全一样，
+    # V1.0 每次出现都各挂一条，运营要对同一句话点三遍「保留原文」
+    seen: dict[tuple, dict] = {}
     uniq: list[dict] = []
     for it in issues:
-        k = (it["type"], it["section"], it["line_no"])
-        if k not in seen:
-            seen.add(k)
-            uniq.append(it)
+        k = (it["type"], _norm_line(it["text"]))
+        if k in seen:
+            seen[k].setdefault("_also", []).append(f"{it['section']}第{it['line_no']}行")
+            continue
+        seen[k] = it
+        uniq.append(it)
+    for it in uniq:
+        if it.get("_also"):
+            it["evidence"] = (f"{it['evidence']}（同一句还出现在 {'、'.join(it.pop('_also'))}，"
+                              "处理一次全部生效）")
 
     db.query(LyricCheck).filter(LyricCheck.lyric_version_id == ver.id).delete()
     rows: list[LyricCheck] = []
@@ -323,6 +330,12 @@ def adopt_suggestion(db: Session, check_id: str, index: int = 0) -> LyricVersion
     c.status = "adopted"
     db.commit()
     return save_version(db, ver.project_id, sections, source="manual", carry_from=ver)
+
+
+def _norm_line(text: str) -> str:
+    import re
+
+    return re.sub(r"[\s，。、；：！？,.!?;:·…—\-“”\"'（）()]", "", text or "")
 
 
 def keep_original(db: Session, check_id: str, reason: str) -> LyricCheck:

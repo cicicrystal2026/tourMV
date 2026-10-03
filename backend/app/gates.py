@@ -51,6 +51,16 @@ def check(db: Session, p: Project) -> Gate:
         ver = _latest_lyric(db, p.id)
         if ver is None:
             g.fail("还没有歌词")
+        elif ver.source == "mock" and settings().llm_ready:
+            # LLM 配了却失败（欠费 / Key 失效 / 限流）：模板歌词不能拿去花钱生曲
+            from .models import AiCall
+
+            last = db.execute(select(AiCall).where(
+                AiCall.project_id == p.id, AiCall.kind == "llm", AiCall.status == "error")
+                .order_by(AiCall.created_at.desc()).limit(1)).scalar_one_or_none()
+            why = (last.error if last else "") or "原因未知"
+            g.fail(f"当前歌词是模板占位，不是 AI 写的：写词模型调用失败（{why[:160]}）。"
+                   "处理好后点「重新生成」")
         elif not ver.checks_done:
             g.fail("自动检查还没跑完")
         else:

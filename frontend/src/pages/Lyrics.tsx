@@ -313,6 +313,13 @@ export default function LyricsPage() {
             该项目已交付并锁定，只读。需要调整请点右上角「新建修订版」——修订版会复制简报与歌词，并重新走一遍检查与闸门。
           </Banner>
         )}
+        {lyric?.source === 'mock' && (
+          // 写词模型调用失败时系统用了模板占位歌词：必须一眼看出来（E2E：欠费导致整版模板歌词，页面毫无提示）
+          <Banner tone="error">
+            <span className="font-medium">这版歌词是模板占位，不是 AI 写的。</span>
+            写词模型调用失败，原因见下方提示（常见：账户欠费 / Key 失效 / 限流）。处理好后点歌词区的「重新生成」。
+          </Banner>
+        )}
         {/* 闸门原因逐条摆出来：V1.0 只把按钮置灰，用户不知道差什么 */}
         {!locked && isHuman && !gate.ok && gate.reasons.length > 0 && (
           <Banner tone="warn">
@@ -652,7 +659,7 @@ export default function LyricsPage() {
                       )}
                     >
                       <span className="font-medium">v{v.version}</span>
-                      <span className="text-ink-faint">{v.source === 'ai' ? 'AI 生成' : '人工编辑'}</span>
+                      <span className="text-ink-faint">{v.source === 'ai' ? 'AI 生成' : v.source === 'mock' ? '模板占位' : '人工编辑'}</span>
                       <span className="text-ink-faint">
                         {flatLineCount(v.sections || [])} 行 · {relative(v.created_at)}
                       </span>
