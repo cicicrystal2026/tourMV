@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import clsx from 'clsx'
 import api from '../lib/api'
+import { useWorkHeartbeat } from '../lib/heartbeat'
 import { Banner, Empty, Field, Modal, PageHeader, Section, Spinner, StateDot } from '../components/ui'
 import Stepper from '../components/Stepper'
 import CandidateCard from '../components/CandidateCard'
@@ -11,6 +12,8 @@ import { CHECK_TYPE_LABEL, flatLineCount, fmtDuration, relative } from '../lib/f
 export default function LyricsPage() {
   const { projectId } = useParams()
   const nav = useNavigate()
+  // F1-11 有效工时：页面在前台且有操作时每 30 秒报一次
+  useWorkHeartbeat(projectId)
   const [detail, setDetail] = useState<any>(null)
   const [lyric, setLyric] = useState<any>(null)
   const [checks, setChecks] = useState<any[]>([])
@@ -42,7 +45,11 @@ export default function LyricsPage() {
   // 「保留原文」要填理由：记下正在处理的检查项
   const [keepFor, setKeepFor] = useState<any>(null)
   const [keepReason, setKeepReason] = useState('')
+  // F7-4 疑点回流：查证结论顺手存进知识库
+  const [keepToKb, setKeepToKb] = useState(false)
+  const [keepSource, setKeepSource] = useState('')
   const [projectsLoading, setProjectsLoading] = useState(true)
+  const [kbCov, setKbCov] = useState<any>(null)
 
   const loadAll = useCallback(
     async (id: string) => {
@@ -57,6 +64,7 @@ export default function LyricsPage() {
           api.candidates(id, roundId || undefined),
         ])
         setDetail(d)
+        if (d.project?.destination) api.kbCoverage(d.project.destination).then(setKbCov).catch(() => {})
         setLyric(l.current)
         setChecks(l.checks || [])
         setSummary(l.summary)
@@ -349,7 +357,19 @@ export default function LyricsPage() {
               </button>
             }
           />
-          <BriefField label="知识库引用" value="未接入（W3 上线；之前史实疑点一律需人工核实）" />
+          <BriefField
+            label="知识库"
+            value={
+              kbCov
+                ? `已核实 ${kbCov.verified} 条${kbCov.enough ? '' : `（建议 ≥${kbCov.min}）`}${b.kb_refs?.length ? ` · 本版写词引用 ${b.kb_refs.length} 条` : ''}`
+                : '—'
+            }
+            action={
+              <a className="text-[11px] text-brand underline ml-1" href="/kb">
+                去补充
+              </a>
+            }
+          />
         </div>
 
         <div className="grid grid-cols-[1fr_380px] gap-5 items-start">
@@ -557,6 +577,9 @@ export default function LyricsPage() {
                     >
                       <div className="flex items-center gap-2">
                         <span className={c.status === 'pending' ? 'tag-human' : 'tag'}>{CHECK_TYPE_LABEL[c.type]}</span>
+                        {c.type === 'fact' && c.kb_entry_ids?.length > 0 && (
+                          <span className="tag-brand" title="依据来自已核实的知识库条目">有出处</span>
+                        )}
                         {c.needs_manual && (
                           <span className="tag-human" title="知识库尚未接入，这条疑点没有可追溯出处，需人工查证后再决定">
                             需人工核实
@@ -995,13 +1018,27 @@ export default function LyricsPage() {
             </button>
             <button
               className="btn-primary"
-              disabled={!!busy || keepReason.trim().length < 2}
+              disabled={!!busy || keepReason.trim().length < 2 || (keepToKb && !keepSource.trim())}
               onClick={() =>
-                act('keep', () => api.keepCheck(keepFor.id, keepReason.trim()), () => {
-                  setKeepFor(null)
-                  setMsg('已保留原文（理由已留档）')
-                  loadAll(p.id)
-                })
+                act(
+                  'keep',
+                  async () => {
+                    await api.keepCheck(keepFor.id, keepReason.trim())
+                    if (keepToKb)
+                      await api.kbFromCheck(keepFor.id, {
+                        destination: p.destination,
+                        content: keepReason.trim(),
+                        source_name: keepSource.trim(),
+                      })
+                  },
+                  () => {
+                    setKeepFor(null)
+                    setMsg(keepToKb ? '已保留原文，查证结论已存入知识库（下次核对会引用）' : '已保留原文（理由已留档）')
+                    setKeepToKb(false)
+                    setKeepSource('')
+                    loadAll(p.id)
+                  },
+                )
               }
             >
               确认保留
@@ -1025,6 +1062,29 @@ export default function LyricsPage() {
                 onChange={(e) => setKeepReason(e.target.value)}
               />
             </Field>
+            {keepFor.type === 'fact' && (
+              <>
+                <label className="flex items-center gap-2 text-[12px]">
+                  <input
+                    type="checkbox"
+                    className="accent-[#0F5E57]"
+                    checked={keepToKb}
+                    onChange={(e) => setKeepToKb(e.target.checked)}
+                  />
+                  把查证结论存入知识库（以后同类疑点直接引用，不用再查）
+                </label>
+                {keepToKb && (
+                  <Field label="出处（你查证用的来源）">
+                    <input
+                      className="input"
+                      value={keepSource}
+                      placeholder="例如：长白山管委会官网 / 《长白山志》"
+                      onChange={(e) => setKeepSource(e.target.value)}
+                    />
+                  </Field>
+                )}
+              </>
+            )}
           </div>
         )}
       </Modal>

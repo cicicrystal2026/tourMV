@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import clsx from 'clsx'
 import api from '../lib/api'
+import ProjectReview from '../components/ProjectReview'
+import { useWorkHeartbeat } from '../lib/heartbeat'
 import { Banner, Empty, Modal, PageHeader, ProgressBar, Section, Spinner, StateDot } from '../components/ui'
 import Stepper from '../components/Stepper'
 import Timeline, { usePeaks } from '../components/Timeline'
@@ -9,6 +11,8 @@ import { VARIANT_LABEL, fmtTime, relative } from '../lib/format'
 
 export default function EditPage() {
   const { projectId } = useParams()
+  // F1-11 有效工时：页面在前台且有操作时每 30 秒报一次
+  useWorkHeartbeat(projectId)
   const nav = useNavigate()
   const [detail, setDetail] = useState<any>(null)
   const [tl, setTl] = useState<any>(null)
@@ -41,6 +45,7 @@ export default function EditPage() {
   const [msg, setMsg] = useState('')
   const [projects, setProjects] = useState<any[] | null>(null)
   const [showSource, setShowSource] = useState(false)
+  const [showReview, setShowReview] = useState(false)
 
   const audio = useRef<HTMLAudioElement>(null)
   const video = useRef<HTMLVideoElement>(null)
@@ -212,6 +217,7 @@ export default function EditPage() {
 
   return (
     <>
+      {projectId && <ProjectReview projectId={projectId} open={showReview} onClose={() => setShowReview(false)} />}
       <PageHeader
         crumbs={
           <>
@@ -238,7 +244,12 @@ export default function EditPage() {
         }
         actions={
           p.locked ? (
-            <span className="text-[11px] text-ink-faint">已交付 · 只读（成片可下载，可回填投放数据）</span>
+            <span className="flex items-center gap-2">
+              <span className="text-[11px] text-ink-faint">已交付 · 只读（成片可下载，可回填投放数据）</span>
+              <button className="btn" onClick={() => setShowReview(true)}>
+                项目复盘
+              </button>
+            </span>
           ) : (
           <>
             {p.reject_targets?.length > 0 && (

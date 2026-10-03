@@ -39,6 +39,9 @@ def create(db: Session, *, name: str, destination: str, type_: str = "sample",
     db.add(Brief(project_id=p.id, mood=mood or [], genre=genre, bpm_min=bpm_min, bpm_max=bpm_max,
                  duration_s=duration_s, vocal=vocal, style_prompt=style_prompt,
                  trend_card_ids=trend_card_ids or [], forbidden=forbidden))
+    from . import metrics
+
+    metrics.on_transition(db, p.id, "", "briefing")
     db.commit()
     db.refresh(p)
     return p
@@ -56,6 +59,9 @@ def brief_of(db: Session, project_id: str) -> Brief | None:
 
 
 def set_state(db: Session, project: Project, state: str, note: str | None = None) -> Project:
+    from . import metrics
+
+    metrics.on_transition(db, project.id, project.status, state)   # 工时：进出人工节点
     project.status = state
     project.status_note = note if note is not None else sm.spec(state).enter_note
     db.commit()
@@ -174,6 +180,9 @@ def revise(db: Session, project_id: str) -> Project:
         db.add(LV(project_id=p.id, version=1, sections=lv.sections, source="manual",
                   checks_done=False))
         p.status, p.status_note = "lyric_review", "修订版：已复制原歌词，正在重新检查"
+    from . import metrics
+
+    metrics.on_transition(db, p.id, "", p.status)
     db.commit()
     db.refresh(p)
     if lv is not None:

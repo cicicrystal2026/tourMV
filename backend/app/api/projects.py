@@ -101,6 +101,39 @@ def advance(project_id: str, payload: dict | None = Body(default=None),
     return {**r, "project": S.project(svc.get(db, project_id))}
 
 
+@router.get("/projects/{project_id}/review")
+def project_review(project_id: str, db: Session = Depends(get_db)) -> dict:
+    """项目复盘（F1-11）：各人工节点工时、费用、体验指标。"""
+    from ..services import metrics
+    try:
+        return metrics.review(db, project_id)
+    except ProjectError as e:
+        _fail(e)
+
+
+@router.post("/projects/{project_id}/worklog/heartbeat")
+def worklog_heartbeat(project_id: str, payload: dict = Body(default={}),
+                      db: Session = Depends(get_db)) -> dict:
+    """页面在前台且有操作时，前端每 30 秒报一次，用来计有效工时。"""
+    from ..services import metrics
+    try:
+        return metrics.heartbeat(db, project_id, int(payload.get("seconds") or metrics.HEARTBEAT_S))
+    except ProjectError as e:
+        _fail(e)
+
+
+@router.put("/projects/{project_id}/worklog/{node}")
+def worklog_manual(project_id: str, node: str, payload: dict = Body(...),
+                   db: Session = Depends(get_db)) -> dict:
+    """补录工时（保留自动记录的原值）。"""
+    from ..services import metrics
+    try:
+        return metrics.set_manual(db, project_id, node, float(payload.get("minutes") or 0),
+                                  payload.get("note", ""))
+    except (ProjectError, ValueError) as e:
+        _fail(e)
+
+
 @router.post("/projects/{project_id}/revise")
 def revise(project_id: str, db: Session = Depends(get_db)) -> dict:
     """已交付项目新建修订版（PRD V1.1 §4.2）。"""

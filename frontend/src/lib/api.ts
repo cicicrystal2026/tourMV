@@ -129,6 +129,12 @@ export const api = {
   project: (id: string) => get(`/api/projects/${id}`),
   advance: (id: string, body?: Json) => post(`/api/projects/${id}/advance`, body ?? {}),
   reject: (id: string, target: string) => post(`/api/projects/${id}/reject`, { target }),
+  /** 项目复盘（F1-11） */
+  projectReview: (id: string) => get(`/api/projects/${id}/review`),
+  workHeartbeat: (id: string) => post(`/api/projects/${id}/worklog/heartbeat`, { seconds: 30 }),
+  workManual: (id: string, node: string, minutes: number, note = '') =>
+    put(`/api/projects/${id}/worklog/${node}`, { minutes, note }),
+  selectionReportUrl: (format: 'md' | 'csv' = 'md') => `/api/music/selection-report?format=${format}`,
   /** 已交付（锁定）项目新建修订版 */
   revise: (id: string) => post(`/api/projects/${id}/revise`),
   projectCalls: (id: string) => get(`/api/projects/${id}/calls`),

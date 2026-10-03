@@ -33,7 +33,8 @@ VARIANTS = {
 # 短版规格（PRD F3-8）：2:30–2:50
 SHORT_MIN_S, SHORT_MAX_S = 150.0, 170.0
 # 含 AI 画面的成片，片尾字卡（PRD V1.1 §7.3）
-AI_CARD_TEXT = "含 AI 生成画面 · Contains AI-generated visuals"
+AI_CARD_ZH = "含 AI 生成画面"
+AI_CARD_EN = "Contains AI-generated visuals"
 AI_CARD_SECONDS = 3.5
 
 # 历史版本号 → 现在的等价版本。
@@ -106,11 +107,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         s = max(0.0, float(ln.get("start_s", 0)) - offset_s)
         e = max(s + 0.3, float(ln.get("end_s", 0)) - offset_s)
         text = (ln.get("text") or "").replace("\n", " ").replace(",", "，")
-        rows.append(f"Dialogue: 0,{_ts(s)},{_ts(e)},ZH,,0,0,0,,{text}")
+        en = ""
         if english and i < len(english):
-            en = (english[i] or "").replace("\n", " ").replace(",", " ")
-            if en:
-                rows.append(f"Dialogue: 0,{_ts(s)},{_ts(e)},EN,,0,0,0,,{en}")
+            en = (english[i] or "").replace("\n", " ").replace(",", " ").strip()
+        if en:
+            # 中英合成同一条字幕事件、中文在上、英文用 EN 样式（\r 切样式）。
+            # 分成两条事件时，英文一折行，字幕渲染器的防重叠就会把上下顺序打乱
+            # （V1.0 自测抽帧发现：同一支片里英文时在上、时在下）。
+            rows.append(f"Dialogue: 0,{_ts(s)},{_ts(e)},ZH,,0,0,0,,{text}\\N{{\\rEN}}{en}")
+        else:
+            rows.append(f"Dialogue: 0,{_ts(s)},{_ts(e)},ZH,,0,0,0,,{text}")
     return head + "\n".join(rows) + "\n"
 
 
@@ -219,13 +225,20 @@ def _has_ai_shots(db: Session, tl: Timeline) -> bool:
                for a in db.execute(select(Asset).where(Asset.id.in_(ids))).scalars())
 
 
-def _ai_card_filter(span: float) -> str:
+def _ai_card_filter(span: float, w: int, h: int) -> str:
+    """片尾 AI 字卡。字号按画面短边算、中英分两行 ——
+    最初按高度算字号，竖版上整行被裁掉两头（自测抽帧发现，自检本身看不出来）。"""
     font = media.cjk_fontfile()
     fontarg = f"fontfile='{esc_filter_path(font)}':" if font else ""
     t0 = max(0.0, span - AI_CARD_SECONDS)
-    return (f"drawbox=y=ih*0.42:w=iw:h=ih*0.16:color=black@0.55:t=fill:enable='gte(t,{t0:.2f})',"
-            f"drawtext={fontarg}text='{AI_CARD_TEXT}':fontcolor=white:fontsize=h*0.032:"
-            f"x=(w-text_w)/2:y=(h-text_h)/2:enable='gte(t,{t0:.2f})'")
+    base = min(w, h)
+    fz, fe = int(base * 0.055), int(base * 0.032)
+    on = f"enable='gte(t,{t0:.2f})'"
+    return (f"drawbox=x=0:y=ih/2-{int(fz * 1.6)}:w=iw:h={int(fz * 3.2)}:color=black@0.55:t=fill:{on},"
+            f"drawtext={fontarg}text='{AI_CARD_ZH}':fontcolor=white:fontsize={fz}:"
+            f"x=(w-text_w)/2:y=h/2-{int(fz * 1.05)}:{on},"
+            f"drawtext={fontarg}text='{AI_CARD_EN}':fontcolor=white@0.9:fontsize={fe}:"
+            f"x=(w-text_w)/2:y=h/2+{int(fz * 0.25)}:{on}")
 
 
 def quality_check(job: RenderJob, cfg: dict, *, expect_s: float, short: bool,
@@ -347,7 +360,7 @@ def render_variant(db: Session, project_id: str, variant: str, progress=None) ->
             vf = f"subtitles=filename='{esc_filter_path(ass)}'"
             sub_lines = len(lines)
         if want_card:
-            vf = (vf + "," if vf else "") + _ai_card_filter(span)
+            vf = (vf + "," if vf else "") + _ai_card_filter(span, cfg["w"], cfg["h"])
 
         if vf:
             cmd += ["-vf", vf]

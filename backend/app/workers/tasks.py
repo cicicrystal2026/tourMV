@@ -32,6 +32,9 @@ def _advance_if(db: Session, project_id: str, expected: str, target: str) -> boo
     p = db.get(Project, project_id)
     if p is None or p.status != expected:
         return False
+    from ..services import metrics
+
+    metrics.on_transition(db, project_id, expected, target)
     p.status = target
     p.status_note = sm.spec(target).enter_note
     if target == "delivered":

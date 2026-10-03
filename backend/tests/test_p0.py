@@ -566,3 +566,33 @@ def test_fact_check_cites_kb(client, monkeypatch):
         db.query(LyricCheck).filter(LyricCheck.lyric_version_id == ver.id).delete()
         db.delete(ver)
         db.commit()
+
+
+# ------------------------------------------------------------------ 度量：工时 / 复盘 / 选型结论（F1-10 / F1-11）
+def test_worklog_review_and_selection_report(client):
+    r = client.post("/api/projects", json={"name": "工时测试", "destination": "吉林·长白山", "genre": "folk"})
+    pid = r.json()["id"]
+    # 新建即进入「简报中」人工节点：心跳计入
+    assert client.post(f"/api/projects/{pid}/worklog/heartbeat", json={"seconds": 30}).json()["counted"] == 30
+    assert client.post(f"/api/projects/{pid}/worklog/heartbeat", json={"seconds": 9999}).json()["counted"] == 45, \
+        "单次心跳封顶，防止异常请求灌水"
+    rv = client.get(f"/api/projects/{pid}/review").json()
+    node = rv["work"]["nodes"][0]
+    assert node["node"] == "briefing" and node["open"] and node["active_minutes"] == round(75 / 60, 1)
+    # 确认简报 → 关闭简报节点
+    assert client.post(f"/api/projects/{pid}/advance").status_code == 200
+    rv = client.get(f"/api/projects/{pid}/review").json()
+    assert not rv["work"]["nodes"][0]["open"]
+    # 机器在跑时不计工时
+    assert client.post(f"/api/projects/{pid}/worklog/heartbeat", json={}).json()["counted"] in (0, 30)
+    # 补录
+    r = client.put(f"/api/projects/{pid}/worklog/briefing", json={"minutes": 12, "note": "线下沟通"})
+    assert r.status_code == 200
+    rv = client.get(f"/api/projects/{pid}/review").json()
+    assert rv["work"]["nodes"][0]["manual_minutes"] == 12 and rv["work"]["total_minutes"] >= 12
+    assert "cost" in rv and "experience" in rv
+
+    md = client.get("/api/music/selection-report?format=md")
+    assert md.status_code == 200 and "选型结论" in md.text and "PRD 要求 ≥ 6 轮" in md.text
+    csv_ = client.get("/api/music/selection-report?format=csv")
+    assert csv_.status_code == 200 and csv_.text.startswith("选型轮")

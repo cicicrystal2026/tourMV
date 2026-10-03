@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import api from '../lib/api'
+import ProjectReview from '../components/ProjectReview'
 import { fmtDate, relative, JOB_STATUS_LABEL, DEMO_MARK } from '../lib/format'
 import {
   Banner,
@@ -23,6 +24,11 @@ export default function Dashboard() {
   const [data, setData] = useState<any>(null)
   const [err, setErr] = useState('')
   const [showNew, setShowNew] = useState(false)
+  // F1-9 本周热歌抽屉；从抽屉「用此卡新建项目」时预选该卡
+  const [showTrends, setShowTrends] = useState(false)
+  const [presetCard, setPresetCard] = useState('')
+  // F1-11 项目复盘
+  const [reviewId, setReviewId] = useState('')
   const [showImport, setShowImport] = useState(false)
   const [showModels, setShowModels] = useState(false)
   const [busy, setBusy] = useState('')
@@ -83,7 +89,16 @@ export default function Dashboard() {
             <button className="btn" onClick={() => setShowImport(true)}>
               导入创作简报
             </button>
-            <button className="btn-primary" onClick={() => setShowNew(true)}>
+            <button className="btn" onClick={() => setShowTrends(true)}>
+              本周热歌
+            </button>
+            <button
+              className="btn-primary"
+              onClick={() => {
+                setPresetCard('')
+                setShowNew(true)
+              }}
+            >
               新建样片项目
             </button>
           </>
@@ -173,6 +188,18 @@ export default function Dashboard() {
                         </div>
                         <div className="mt-1.5 text-[11px] text-ink-faint truncate">{p.destination}</div>
                         <div className="mt-1 text-[11px] text-ink-soft">{p.state_label}</div>
+                        {p.status === 'delivered' && (
+                          <span
+                            role="button"
+                            className="mt-1 inline-block text-[11px] text-brand underline"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setReviewId(p.id)
+                            }}
+                          >
+                            项目复盘
+                          </span>
+                        )}
                         {p.status_note && (
                           <div className="mt-0.5 text-[10px] text-ink-faint truncate">{p.status_note}</div>
                         )}
@@ -281,9 +308,14 @@ export default function Dashboard() {
             <Section
               title="选型战绩"
               right={
-                <button className="text-[11px] text-brand underline" onClick={() => setShowModels(true)}>
-                  详情
-                </button>
+                <span className="flex gap-2">
+                  <a className="text-[11px] text-brand underline" href={api.selectionReportUrl('md')} download>
+                    导出选型结论
+                  </a>
+                  <button className="text-[11px] text-brand underline" onClick={() => setShowModels(true)}>
+                    详情
+                  </button>
+                </span>
               }
               bodyClass="p-3"
             >
@@ -321,7 +353,18 @@ export default function Dashboard() {
         </div>
       </div>
 
+      <ProjectReview projectId={reviewId} open={!!reviewId} onClose={() => setReviewId('')} />
+      <TrendsDrawer
+        open={showTrends}
+        onClose={() => setShowTrends(false)}
+        onUse={(id) => {
+          setShowTrends(false)
+          setPresetCard(id)
+          setShowNew(true)
+        }}
+      />
       <NewProjectModal
+        presetCard={presetCard}
         open={showNew}
         onClose={() => setShowNew(false)}
         onDone={(id) => {
@@ -410,13 +453,18 @@ function NewProjectModal({
   open,
   onClose,
   onDone,
+  presetCard = '',
 }: {
   open: boolean
   onClose: () => void
   onDone: (id: string) => void
+  presetCard?: string
 }) {
   const [cards, setCards] = useState<any[]>([])
   const [picked, setPicked] = useState<string[]>([])
+  useEffect(() => {
+    if (open && presetCard) setPicked([presetCard])
+  }, [open, presetCard])
   const [form, setForm] = useState<any>({
     name: '',
     destination: '',
@@ -674,6 +722,66 @@ function ImportBriefModal({
               创建并进入
             </button>
           </div>
+        )}
+      </div>
+    </Modal>
+  )
+}
+
+
+/** F1-9 本周热歌：近 30 天热度排行与二创素材卡，可直接「用此卡新建项目」。 */
+function TrendsDrawer({ open, onClose, onUse }: { open: boolean; onClose: () => void; onUse: (id: string) => void }) {
+  const [data, setData] = useState<any>(null)
+  const [week, setWeek] = useState('')
+  useEffect(() => {
+    if (!open) return
+    api.trendCards(week || undefined).then(setData).catch(() => setData({ items: [], weeks: [] }))
+  }, [open, week])
+  const items: any[] = data?.items || []
+  return (
+    <Modal open={open} title="本周热歌" onClose={onClose} width="max-w-[760px]">
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center gap-2 text-[12px]">
+          <span className="text-ink-faint">周次</span>
+          <select className="input h-8 w-[140px]" value={week || data?.week || ''} onChange={(e) => setWeek(e.target.value)}>
+            {(data?.weeks || []).map((w: string) => (
+              <option key={w} value={w}>
+                {w}
+              </option>
+            ))}
+          </select>
+          {items.some((c) => c.is_seed) && (
+            <span className="tag-human">含演示数据：热歌监控（monitor.py）尚未接入真实 YouTube 数据</span>
+          )}
+        </div>
+        {!data ? (
+          <Spinner />
+        ) : items.length === 0 ? (
+          <Empty text="本周周报未生成" />
+        ) : (
+          items.map((c) => (
+            <div key={c.id} className="border border-line rounded-btn p-3">
+              <div className="flex items-center gap-2">
+                <span className="tag">#{c.rank}</span>
+                <span className="text-[13px] font-medium">{c.song}</span>
+                <span className="text-[11px] text-ink-faint">{c.artist}</span>
+                {c.is_seed && <span className="tag-human">演示</span>}
+                <button className="btn-primary btn-sm ml-auto" onClick={() => onUse(c.id)}>
+                  用此卡新建项目
+                </button>
+              </div>
+              {c.why_hot && <div className="mt-1.5 text-[11px] text-ink-soft">走红原因：{c.why_hot}</div>}
+              <div className="mt-1.5 flex flex-wrap gap-1">
+                {['genre', 'bpm', 'vocal_style', 'mood']
+                  .filter((k) => c.elements?.[k])
+                  .map((k) => (
+                    <span key={k} className="tag">
+                      {Array.isArray(c.elements[k]) ? c.elements[k].join('/') : String(c.elements[k])}
+                    </span>
+                  ))}
+              </div>
+            </div>
+          ))
         )}
       </div>
     </Modal>

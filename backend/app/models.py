@@ -419,6 +419,26 @@ class PublishMetric(IdMixin, TimestampMixin, Base):
     note: Mapped[str] = mapped_column(Text, default="")
 
 
+# --------------------------------------------------------------------- 人工工时
+class WorkLog(IdMixin, TimestampMixin, Base):
+    """人工节点工时（PRD V1.1 F1-11 / §8 work_log）。
+
+    entered_at / confirmed_at 记录节点进出时间（墙钟），
+    active_seconds 只累计「页面在前台且有操作」的时长（前端心跳），用于算真实投入；
+    manual_minutes 供人工补录修正，原值保留。
+    """
+
+    __tablename__ = "work_log"
+
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    node: Mapped[str] = mapped_column(String(40))
+    entered_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    active_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    manual_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
+    note: Mapped[str] = mapped_column(String(300), default="")
+
+
 # --------------------------------------------------------------------- 文化知识库
 class KbEntry(IdMixin, TimestampMixin, Base):
     """文化知识库条目（PRD V1.1 §6.7 / D4）。

@@ -56,6 +56,18 @@ def generate(project_id: str, payload: dict = Body(...), db: Session = Depends(g
     return out
 
 
+@router.get("/music/selection-report")
+def selection_report(format: str = "md", db: Session = Depends(get_db)):
+    """选型结论导出（F1-10）：md / csv。"""
+    from fastapi.responses import PlainTextResponse
+
+    from ..services import metrics
+    body, mime = metrics.selection_report(db, "csv" if format == "csv" else "md")
+    name = "selection-report." + ("csv" if format == "csv" else "md")
+    return PlainTextResponse(body, media_type=mime,
+                             headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
 @router.get("/projects/{project_id}/music/candidates")
 def candidates(project_id: str, round: int | None = None, round_id: str | None = None,
                blind: bool | None = None, db: Session = Depends(get_db)) -> dict:

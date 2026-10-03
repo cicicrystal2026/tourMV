@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import clsx from 'clsx'
 import api from '../lib/api'
+import { useWorkHeartbeat } from '../lib/heartbeat'
 import { Banner, Empty, Modal, PageHeader, ProgressBar, Section, Spinner } from '../components/ui'
 import ReviewPager, { AiVerdict } from '../components/ReviewPager'
 
@@ -16,6 +17,8 @@ const STATUS_TONE: Record<string, string> = {
 export default function StoryboardPage() {
   const { projectId } = useParams()
   const nav = useNavigate()
+  // F1-11 有效工时：页面在前台且有操作时每 30 秒报一次
+  useWorkHeartbeat(projectId)
   const [data, setData] = useState<any>(null)
   const [detail, setDetail] = useState<any>(null)
   const [busy, setBusy] = useState('')
