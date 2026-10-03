@@ -166,8 +166,12 @@ def revise(db: Session, project_id: str) -> Project:
     src = get(db, project_id)
     if src.locked_at is None:
         raise ProjectError("只有已交付（锁定）的项目需要新建修订版，进行中的项目直接修改即可")
-    n = len(list(db.execute(select(Project).where(Project.parent_project_id == src.id)).scalars())) + 1
-    p = Project(name=f"{src.name}（修订{n}）"[:200], destination=src.destination, type=src.type,
+    # 修订版的修订版不叠后缀（V1.0 会出现「（修订1）（修订1）」）：按原始名统一编号
+    import re
+
+    base = re.sub(r"(（修订\d+）)+$", "", src.name)
+    n = len(list(db.execute(select(Project).where(Project.name.like(f"{base}（修订%"))).scalars())) + 1
+    p = Project(name=f"{base}（修订{n}）"[:200], destination=src.destination, type=src.type,
                 language=src.language, subtitle_language=src.subtitle_language,
                 status="briefing", status_note=sm.STATES["briefing"].enter_note,
                 parent_project_id=src.id)
