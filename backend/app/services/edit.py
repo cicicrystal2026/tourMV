@@ -13,6 +13,10 @@ from . import prompts
 from .music import winner_of
 
 SCENE_BATCH = 12
+# 前奏上限：人声必须在成片第 MAX_INTRO_S 秒内出现（短视频前 3 秒决定去留）。
+# 超了就从「首句人声前 INTRO_LEAD_S 秒」处起播，留一点进入感，并做淡入。
+MAX_INTRO_S = 3.0
+INTRO_LEAD_S = 1.5
 
 
 # ------------------------------------------------------------------ 音频分析
@@ -52,11 +56,34 @@ def analyze(db: Session, project_id: str) -> Timeline:
     if aligned.get("engine") == "analytic" and was == "whisper" and tl.lyric_lines:
         return tl
 
-    tl.audio_path = w.audio_path
+    lines_out = aligned.get("lines", [])
+    beat_list = beats.get("beats", [])
+    audio_path = w.audio_path
+    trim = 0.0
+    vocal_span = aligned.get("vocal_span")
+    # 只有「时间来自歌声」时才裁前奏：估算出来的首句时间不可信，按它裁会切掉人声
+    if aligned.get("engine") == "whisper" and lines_out:
+        first = float(lines_out[0].get("start_s") or 0.0)
+        if first > MAX_INTRO_S:
+            trim = round(first - INTRO_LEAD_S, 3)
+            try:
+                audio_path = _trim_intro(w.audio_path, trim)
+            except Exception:  # noqa: BLE001  裁剪失败就用原曲，不阻塞流程
+                trim, audio_path = 0.0, w.audio_path
+    if trim > 0:
+        for ln in lines_out:
+            ln["start_s"] = round(max(0.0, float(ln["start_s"]) - trim), 3)
+            ln["end_s"] = round(max(0.0, float(ln["end_s"]) - trim), 3)
+        beat_list = [round(b - trim, 3) for b in beat_list if b >= trim]
+        duration = round(duration - trim, 3)
+        if vocal_span:
+            vocal_span = [round(max(0.0, float(v) - trim), 3) for v in vocal_span]
+
+    tl.audio_path = audio_path
     tl.bpm = beats.get("bpm", 0.0)
-    tl.beats = beats.get("beats", [])
+    tl.beats = beat_list
     tl.duration_s = duration
-    tl.lyric_lines = aligned.get("lines", [])
+    tl.lyric_lines = lines_out
     # 记下这条时间轴是怎么来的 —— 界面要如实告诉用户
     # 「时间是唱出来的」还是「按字数估的」，否则音画飘了也查不出原因。
     tl.align_meta = {
@@ -64,13 +91,28 @@ def analyze(db: Session, project_id: str) -> Timeline:
         "note": aligned.get("note", ""),
         "match_ratio": aligned.get("match_ratio"),
         "anchored": aligned.get("anchored"),
-        "vocal_span": aligned.get("vocal_span"),
+        "vocal_span": vocal_span,
         "dropped_segments": aligned.get("dropped_segments"),
         "beat_engine": beats.get("engine"),
+        # 裁掉的前奏秒数（0 = 原曲前奏本来就不超过 3 秒，或对齐不可信未裁）
+        "intro_trim_s": trim,
     }
     db.commit()
     db.refresh(tl)
     return tl
+
+
+def _trim_intro(src: str, start_s: float) -> str:
+    """从 start_s 起截取整首歌（0.4 秒淡入，避免硬切爆音），写到同目录的新文件。"""
+    from pathlib import Path
+
+    p = Path(src)
+    dst = p.with_name(f"{p.stem}-intro{int(round(start_s * 1000))}ms.mp3")
+    if not dst.exists() or dst.stat().st_size < 10_000:
+        media.run(["ffmpeg", "-y", "-v", "error", "-ss", f"{start_s:.3f}", "-i", str(p),
+                   "-af", "afade=t=in:st=0:d=0.4", "-c:a", "libmp3lame", "-q:a", "2", str(dst)],
+                  timeout=300)
+    return str(dst)
 
 
 # ------------------------------------------------------------------ 自动粗剪

@@ -94,6 +94,11 @@ def advance(db: Session, project_id: str, payload: dict | None = None) -> dict:
     # 如果此时状态还没切过去，推进条件不成立，项目就会卡死在中间态。
     # 派发失败（如模型未配置、超预算）则回滚到原状态，错误原样抛给界面。
     prev, prev_note = p.status, p.status_note
+    if p.status == "lyric_review" and _reusable_music(db, p) is not None:
+        # 修订版、歌词未改：沿用原曲，跳过生曲，直接到「待选曲」确认（不花钱、不用再盲听）
+        set_state(db, p, "music_review", "修订版沿用原曲（歌词未改），确认即可进入配图")
+        db.refresh(p)
+        return {"status": p.status, "dispatched": "reuse_music"}
     set_state(db, p, nxt)
     try:
         dispatched = _dispatch(db, p, nxt, payload or {})
@@ -177,9 +182,12 @@ def revise(db: Session, project_id: str) -> Project:
     lv = db.execute(select(LV).where(LV.project_id == src.id).order_by(LV.version.desc())
                     .limit(1)).scalar_one_or_none()
     if lv is not None:
-        db.add(LV(project_id=p.id, version=1, sections=lv.sections, source="manual",
-                  checks_done=False))
+        new_lv = LV(project_id=p.id, version=1, sections=lv.sections, source="manual",
+                    checks_done=False)
+        db.add(new_lv)
+        db.flush()
         p.status, p.status_note = "lyric_review", "修订版：已复制原歌词，正在重新检查"
+        _copy_selected_music(db, src, p, new_lv.id)
         # 镜头也一并带过来（画面文件与素材资产复用，不重复花生图的钱），
         # 但状态退回「待审核」：修订版要重新过一遍镜头闸门。歌词若在修订中被改动，
         # 分镜会被判定为过期并按新歌词重新提炼（见 storyboard.is_stale）。
@@ -201,6 +209,44 @@ def revise(db: Session, project_id: str) -> Project:
     if lv is not None:
         enqueue(db, "lyric_check", project_id=p.id, ref_id=p.id, name="押韵 / 字数 / 史实检查")
     return p
+
+
+def _copy_selected_music(db: Session, src: Project, p: Project, lyric_version_id: str) -> None:
+    """修订版沿用原项目选定的曲目（同一音频文件，不重新生成、不花钱）。
+
+    绑定到修订版的第 1 版歌词：只要歌词没改，确认歌词时直接跳过生曲与选曲；
+    歌词一改（产生新版本）就不再沿用 —— 旧曲唱的是旧词。
+    """
+    import uuid
+
+    from ..models import MusicRound
+
+    c = db.get(MusicCandidate, src.selected_candidate_id) if src.selected_candidate_id else None
+    if c is None or c.status != "done" or not c.audio_path:
+        return
+    r = MusicRound(project_id=p.id, kind="production", round_no=1,
+                   model_keys=[c.model_key], variants=1)
+    db.add(r)
+    db.flush()
+    cp = MusicCandidate(project_id=p.id, lyric_version_id=lyric_version_id, round=1, round_id=r.id,
+                        model_key=c.model_key, model_name=c.model_name, variant=1, label="A",
+                        audio_path=c.audio_path, bpm=c.bpm, duration_s=c.duration_s, vocal=c.vocal,
+                        fit_score=c.fit_score, fit_reason=c.fit_reason, status="done", cost=0.0,
+                        elapsed_s=0.0, is_mock=c.is_mock, audio_token=uuid.uuid4().hex)
+    db.add(cp)
+    db.flush()
+    r.winner_candidate_id = cp.id
+    p.selected_candidate_id = cp.id
+
+
+def _reusable_music(db: Session, p: Project) -> MusicCandidate | None:
+    """修订版沿用的原曲是否仍可用：选定曲目绑定的正是当前最新歌词版本。"""
+    c = db.get(MusicCandidate, p.selected_candidate_id) if p.selected_candidate_id else None
+    if c is None or not c.lyric_version_id or not p.parent_project_id:
+        return None
+    lv = db.execute(select(LyricVersion).where(LyricVersion.project_id == p.id)
+                    .order_by(LyricVersion.version.desc()).limit(1)).scalar_one_or_none()
+    return c if lv is not None and lv.id == c.lyric_version_id else None
 
 
 def detail(db: Session, project_id: str) -> dict:

@@ -424,6 +424,27 @@ def _cluster_span(js: list[int], asr_times: list[tuple[float, float]],
     return asr_times[best[0]][0], asr_times[best[-1]][1]
 
 
+def _load_audio(audio_path: str, sr: int = 16000):
+    """用 ffmpeg 把音频解码成 16k 单声道 float32 数组，直接喂给 faster-whisper。
+
+    不让 faster-whisper 自己解码：它内部调 `av.open(..., metadata_errors=...)`，
+    而 PyAV 14+ 删掉了这个参数 —— 实测报 `open() got an unexpected keyword argument
+    'metadata_errors'`，强制对齐整个失效、悄悄回退成「按字数估算」，歌词与歌声对不上。
+    """
+    import subprocess
+
+    import numpy as np  # type: ignore
+
+    out = subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-i", str(audio_path),
+         "-f", "f32le", "-ac", "1", "-ar", str(sr), "-"],
+        capture_output=True, check=True, timeout=600).stdout
+    a = np.frombuffer(out, dtype=np.float32)
+    if a.size < sr:
+        raise RuntimeError("音频解码结果过短")
+    return a
+
+
 def _whisper_align(audio_path: str, lines: list[str], duration_s: float) -> dict:
     model = load_align_model()
 
@@ -439,7 +460,7 @@ def _whisper_align(audio_path: str, lines: list[str], duration_s: float) -> dict
     # 识别率的提升（35%→38%）远不值这个代价 —— DTW 在字符级本来就容忍错字，
     # 真正重要的是「哪里有人在唱」这个信息，而这恰恰会被幻觉破坏。
     segs, info = model.transcribe(
-        audio_path, language="zh", beam_size=5,
+        _load_audio(audio_path), language="zh", beam_size=5,
         # ⚠️ **必须关掉 VAD**。Silero VAD 是按「说话」训的，对带伴奏的歌唱
         # 几乎全判成静音 —— 实测 threshold=0.5 时 169 秒里只剩 2.7 秒，
         # 转写结果为空，整个强制对齐直接失效。用 CJK 占比过滤幻觉段即可。

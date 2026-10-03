@@ -669,3 +669,50 @@ def test_regenerate_is_deduped(client, has_real_db):
         with SessionLocal() as db:
             db.query(Job).filter(Job.id == jid).delete()
             db.commit()
+
+
+def test_intro_trim_shifts_timeline(client, has_real_db, monkeypatch, tmp_path):
+    """人声超过 3 秒才出现时裁前奏：时间轴整体前移、音频换成裁过的文件（成片前 3 秒必须有人声）。"""
+    if not has_real_db:
+        pytest.skip("没有真实库备份")
+    from app.adapters import align
+    from app.db import SessionLocal
+    from app.services import edit
+
+    def fake_align(path, lines, duration, **k):
+        return {"engine": "whisper", "note": "", "vocal_span": [31.5, 180.0],
+                "lines": [{"text": t, "start_s": 31.5 + 7 * i, "end_s": 38.0 + 7 * i} for i, t in enumerate(lines)]}
+    monkeypatch.setattr(align, "align_lyrics", fake_align)
+    monkeypatch.setattr(align, "detect_beats", lambda *a, **k: {"bpm": 84, "beats": [i * 0.714 for i in range(250)],
+                                                               "strong_beats": [], "engine": "analytic"})
+    monkeypatch.setattr(edit, "_trim_intro", lambda src, s: str(tmp_path / "trimmed.mp3"))
+    with SessionLocal() as db:
+        tl = edit.analyze(db, CHANGBAI)
+        assert tl.align_meta["intro_trim_s"] == 30.0
+        assert tl.lyric_lines[0]["start_s"] == 1.5
+        assert tl.audio_path.endswith("trimmed.mp3")
+        assert tl.beats[0] >= 0
+
+
+def test_revision_reuses_music_when_lyrics_unchanged(client, has_real_db, monkeypatch):
+    """修订版沿用原曲：歌词没改就跳过生曲直接到待选曲；歌词一改就不再沿用。"""
+    if not has_real_db:
+        pytest.skip("没有真实库备份")
+    from app import gates
+    from app.db import SessionLocal
+    from app.models import MusicCandidate, Project
+    from app.services import projects as P
+
+    with SessionLocal() as db:
+        src = db.get(Project, LIJIANG)
+        if not src.selected_candidate_id:
+            pytest.skip("原项目没有选定曲目")
+        src_audio = db.get(MusicCandidate, src.selected_candidate_id).audio_path
+    rev = client.post(f"/api/projects/{LIJIANG}/revise").json()
+    monkeypatch.setattr(gates, "check", lambda db, p: gates.Gate())
+    with SessionLocal() as db:
+        p = db.get(Project, rev["id"])
+        c = db.get(MusicCandidate, p.selected_candidate_id)
+        assert c is not None and c.audio_path == src_audio and c.cost == 0
+        out = P.advance(db, p.id)
+        assert out["status"] == "music_review" and out["dispatched"] == "reuse_music"
