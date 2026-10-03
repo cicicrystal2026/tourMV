@@ -21,6 +21,7 @@ export default function LyricsPage() {
   const [versions, setVersions] = useState<any[]>([])
   const [models, setModels] = useState<any[]>([])
   const [cands, setCands] = useState<any[]>([])
+  const [cardErr, setCardErr] = useState<Record<string, string>>({})
   const [sections, setSections] = useState<any[]>([])
   const [dirty, setDirty] = useState(false)
   const [picked, setPicked] = useState<Record<string, boolean>>({})
@@ -199,11 +200,13 @@ export default function LyricsPage() {
     setBusy(key)
     setErr('')
     setMsg('')
+    setCardErr({})
     try {
       await fn()
       after?.()
     } catch (e: any) {
       setErr(e.message)
+      setCardErr({ [key]: e.message })
     } finally {
       setBusy('')
     }
@@ -877,6 +880,12 @@ export default function LyricsPage() {
                       onPause={() => setPlaying((v) => (v === c.id ? '' : v))}
                       busy={busy === c.id}
                       readOnly={locked || !['music_generating', 'music_review'].includes(p.status)}
+                      error={cardErr[c.id]}
+                      selectBlock={(() => {
+                        if (!roundMeta?.blind) return ''
+                        const un = cands.filter((x) => x.status === 'done' && !(x.rating?.diction && x.rating?.melody && x.rating?.arrangement)).map((x) => x.label)
+                        return un.length ? `盲听轮需先给全部候选打完三项分再选定，还差：候选 ${un.sort().join('、')}` : ''
+                      })()}
                       onRate={(patch) =>
                         act(c.id, () =>
                           api.rate(c.id, {

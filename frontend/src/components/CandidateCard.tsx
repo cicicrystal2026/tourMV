@@ -1,4 +1,5 @@
 import clsx from 'clsx'
+import { useEffect, useState } from 'react'
 import Waveform from './Waveform'
 import { ScoreDots, StateDot } from './ui'
 import { fmtDuration } from '../lib/format'
@@ -19,6 +20,8 @@ export default function CandidateCard({
   onSelect,
   busy,
   readOnly,
+  selectBlock,
+  error,
 }: {
   c: any
   selected: boolean
@@ -29,8 +32,31 @@ export default function CandidateCard({
   onSelect: () => void
   busy?: boolean
   readOnly?: boolean
+  /** 不能选定的原因（如选型轮还有候选未评分）；有值时按钮置灰并直接展示原因 */
+  selectBlock?: string
+  /** 本卡片上一次操作的错误，就近展示（页面顶部的横幅滚动后看不到） */
+  error?: string
 }) {
-  const rating = c.rating || { diction: 0, melody: 0, arrangement: 0 }
+  // 评分草稿：三项都打完才提交。V1.0 每点一项就提交、其余两项按 0 送，
+  // 被后端以「评分必须在 1-5 之间」拒绝 —— 结果永远存不上分，选型轮也就永远选不定。
+  const saved = c.rating || { diction: 0, melody: 0, arrangement: 0 }
+  const [draft, setDraft] = useState({ diction: saved.diction || 0, melody: saved.melody || 0, arrangement: saved.arrangement || 0 })
+  useEffect(() => {
+    setDraft({ diction: saved.diction || 0, melody: saved.melody || 0, arrangement: saved.arrangement || 0 })
+  }, [saved.diction, saved.melody, saved.arrangement])
+  const [pending, setPending] = useState(false)
+  const rating = { ...draft, total: draft.diction + draft.melody + draft.arrangement }
+  const missing = (['diction', 'melody', 'arrangement'] as const).filter((k) => !draft[k]).length
+  const setScore = (k: 'diction' | 'melody' | 'arrangement', v: number) => {
+    // 函数式更新：连续快速点击时不会拿到旧草稿而丢分；提交放到 effect 里用最新草稿
+    setDraft((d) => ({ ...d, [k]: v }))
+    setPending(true)
+  }
+  useEffect(() => {
+    if (!pending) return
+    setPending(false)
+    if (draft.diction && draft.melody && draft.arrangement) onRate(draft)
+  }, [pending, draft]) // eslint-disable-line react-hooks/exhaustive-deps
   const done = c.status === 'done' && c.audio_url
   const rated = !!(rating.diction && rating.melody && rating.arrangement)
   const avg = rated ? (rating.total / 3).toFixed(1) : null
@@ -112,16 +138,22 @@ export default function CandidateCard({
         ).map(([k, label]) => (
           <div key={k} className="flex items-center justify-between">
             <span className="text-[11px] text-ink-soft">{label}</span>
-            <ScoreDots value={rating[k] || 0} onChange={(v) => onRate({ [k]: v })} readOnly={!done || readOnly} />
+            <ScoreDots value={rating[k] || 0} onChange={(v) => setScore(k, v)} readOnly={!done || readOnly} />
           </div>
         ))}
-        <div className="text-[10px] text-ink-faint text-right">{avg ? `均分 ${avg} / 5` : '未评分'}</div>
+        <div className="text-[10px] text-ink-faint text-right">
+          {avg ? (c.rating ? `均分 ${avg} / 5 · 已保存` : `均分 ${avg} / 5 · 保存中…`) : missing < 3 ? `还差 ${missing} 项，三项打完自动保存` : '未评分'}
+        </div>
       </div>
 
+      {error && <div className="text-[11px] text-red-600 bg-red-50 border border-red-200 rounded-btn px-2 py-1.5">{error}</div>}
+      {!readOnly && !selected && selectBlock && (
+        <div className="text-[11px] text-ink-soft">{selectBlock}</div>
+      )}
       {!readOnly && (
         <button
           className={clsx('btn btn-sm w-full mt-0.5', selected ? 'btn-human' : 'btn-primary')}
-          disabled={!done || busy || (c.is_mock && !c.allow_mock)}
+          disabled={!done || busy || (c.is_mock && !c.allow_mock) || (!selected && !!selectBlock)}
           title={c.is_mock && !c.allow_mock ? '占位结果不能选定为交付曲目' : ''}
           onClick={onSelect}
         >
