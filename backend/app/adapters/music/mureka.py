@@ -99,16 +99,41 @@ class MurekaAdapter(MusicAdapter):
         # 按首计价，与时长无关；单价取决于该实例固定的版本档位
         return round(_price_for(self.model_name) * settings().usd_cny, 4)
 
-    def _request(self, method: str, url: str, **kw) -> requests.Response:
-        """受并发额度约束 + 429 退避重试（最多 4 次，1/2/4/8 秒）。"""
+    def _request(self, method: str, url: str, *,
+                 retries: int = 4, retry_transient: bool = True, **kw) -> requests.Response:
+        """受并发额度约束 + 退避重试。
+
+        重试两类情况（各 4 次，间隔 1/2/4/8 秒）：
+        - **429**：超出账号并发额度。
+        - **瞬时网络错误 / 5xx**：ReadTimeout、连接被重置、SSL 中断、上游 5xx。
+
+        `retry_transient=False` 用在**提交**上：提交时读超时是「薛定谔的成功」——
+        上游可能已经收到请求并开始生成（并且已经计费），盲目重提交会生成第二首、
+        收第二次钱。所以提交只重试 429（429 一定是没被受理）。
+        轮询是幂等的 GET，可以放心重试 —— 实测线上就因为一次 60 秒的
+        读超时把整首歌判失败并重提交，白花一次钱。
+        """
+        transient = (requests.Timeout, requests.ConnectionError,
+                     requests.exceptions.ChunkedEncodingError,
+                     requests.exceptions.SSLError)
+        last_exc: Exception | None = None
         r: requests.Response | None = None
-        for attempt in range(4):
-            with self._gate:
-                r = requests.request(method, url, **kw)
-            if r.status_code != 429:
+        for attempt in range(retries):
+            try:
+                with self._gate:
+                    r = requests.request(method, url, **kw)
+                if r.status_code == 429 or (retry_transient and r.status_code >= 500):
+                    time.sleep(2 ** attempt)     # 可重试的状态码 → 退避后再来
+                    continue
                 return r
-            time.sleep(2 ** attempt)  # 429 = 超出并发额度，退避后再试
-        return r  # type: ignore[return-value]
+            except transient as e:
+                if not retry_transient:
+                    raise
+                last_exc = e
+                time.sleep(2 ** attempt)
+        if r is not None:
+            return r
+        raise last_exc if last_exc else RuntimeError("Mureka 请求失败")
 
     def generate(self, req: GenRequest) -> str:
         s = settings()
@@ -120,8 +145,11 @@ class MurekaAdapter(MusicAdapter):
         }
         if req.seed is not None:
             body["seed"] = req.seed
+        # 提交不做瞬时重试（见 _request 说明）；连接与读分开设超时，
+        # 连不上时 15 秒就能报错，不用干等 120 秒。
         r = self._request("POST", f"{s.mureka_base_url}/v1/song/generate",
-                          headers=self._headers(), json=body, timeout=120)
+                          headers=self._headers(), json=body,
+                          timeout=(15, 120), retry_transient=False)
         r.raise_for_status()
         job_id = str(r.json().get("id") or r.json().get("job_id") or "")
         if not job_id:
@@ -132,8 +160,10 @@ class MurekaAdapter(MusicAdapter):
     def get_result(self, job_id: str) -> GenResult:
         s = settings()
         t0 = time.time()
+        # 轮询是幂等 GET：允许重试，且读超时设短一点（30s）以便快速重来，
+        # 比「一次干等 60 秒、失败就整首判死」健壮得多。
         r = self._request("GET", f"{s.mureka_base_url}/v1/song/query/{job_id}",
-                          headers=self._headers(), timeout=60)
+                          headers=self._headers(), timeout=(15, 30))
         r.raise_for_status()
         data = r.json()
         status = str(data.get("status", "")).lower()

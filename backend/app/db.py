@@ -68,6 +68,29 @@ def init_db() -> None:
     models.Base.metadata.create_all(engine)
     added = _add_missing_columns()
     _backfill_v11(added)
+    _selfheal()
+
+
+def _selfheal() -> None:
+    """启动自愈：修掉「状态与文案互相矛盾」的存量数据。
+
+    目前只有一条 —— 候选已经 done、音频也下得下来，但 error 里还留着上一次
+    失败的旧报错。这是历史 bug 的残留：worker 重试成功后只写了 status，
+    没清 error，于是界面上一直挂着一行红字（如 Mureka 轮询 ReadTimeout），
+    用户看到会以为这首根本没生成出来，从而卡在「待选曲」不敢往下走。
+
+    做成启动自愈而不是一次性脚本，是因为存量数据可能分散在线上沙箱里，
+    没法用本地脚本改；容器每次启动都会走 init_db，顺手修掉最省事。
+    """
+    from sqlalchemy import text
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE music_candidate SET error='' "
+                "WHERE status='done' AND error IS NOT NULL AND error <> ''"))
+    except Exception:      # noqa: BLE001 - 自愈失败不能挡住启动
+        pass
 
 
 # 轻量迁移：SQLite 的 create_all 只建表、**不会给已存在的表加列**。
@@ -86,7 +109,10 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "lyric_check": {"keep_reason": "TEXT DEFAULT ''", "needs_manual": "BOOLEAN DEFAULT 0",
                     "kb_entry_ids": "JSON"},
     "music_candidate": {"round_id": "VARCHAR(36)", "is_mock": "BOOLEAN DEFAULT 0",
-                        "audio_token": "VARCHAR(40) DEFAULT ''"},
+                        "audio_token": "VARCHAR(40) DEFAULT ''",
+                        # 上游任务号：提交后立刻落库，任务重试时用它**续跑轮询**而不是
+                        # 重新提交。Mureka 按首计费，重提交 = 同一首歌付两次钱。
+                        "provider_job_id": "VARCHAR(80) DEFAULT ''"},
     "asset": {"source": "VARCHAR(10) DEFAULT 'shot'", "is_seed": "BOOLEAN DEFAULT 0"},
     "trend_card": {"is_seed": "BOOLEAN DEFAULT 0"},
     "render_job": {"qc": "JSON"},

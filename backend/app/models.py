@@ -174,6 +174,10 @@ class MusicCandidate(IdMixin, TimestampMixin, Base):
     cost: Mapped[float] = mapped_column(Float, default=0.0)
     elapsed_s: Mapped[float] = mapped_column(Float, default=0.0)
     error: Mapped[str] = mapped_column(Text, default="")
+    # 上游（Mureka 等）返回的任务号，提交后立刻落库。
+    # 任务重试时**用它续跑轮询**，而不是重新提交 —— 上游在首次提交时就已开始
+    # 生成并按首计费，重提交等于同一首歌付两次钱（线上真发生过）。
+    provider_job_id: Mapped[str] = mapped_column(String(80), default="")
     model_name: Mapped[str] = mapped_column(String(120), default="")
     round_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     # 占位结果（模型未配置时由 mock 适配器产出）：不打匹配分、不可选定交付、不进统计

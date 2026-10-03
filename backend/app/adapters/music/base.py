@@ -69,6 +69,18 @@ class MusicAdapter(ABC):
     def note(self) -> str:
         return ""
 
+    def attach_request(self, job_id: str, req: GenRequest) -> None:
+        """把「已经提交过的上游任务」与请求重新绑上（重试续跑时用）。
+
+        为什么需要它：任务失败重试时**不能重新提交** ——
+        上游（如 Mureka）在首次提交时就已经开始生成并按首计费了，
+        重提交等于同一首歌付两次钱（线上真发生过）。
+        正确做法是拿原来的任务号继续轮询；但轮询结果里要用的 req
+        （时长兜底、费用估算）只存在内存里，换线程/进程重启后就没了，
+        所以续跑前要重新绑一次。
+        """
+        self._jobs[job_id] = req
+
 
 class MockMusicAdapter(MusicAdapter):
     """无凭证时的兜底：用 ffmpeg 合成真实可播放、时长与 BPM 符合要求的音频。

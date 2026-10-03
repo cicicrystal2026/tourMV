@@ -146,15 +146,45 @@ def h_music_one(ctx: JobContext) -> None:
     )
 
     t0 = time.time()
-    try:
-        jid = adapter.generate(req)
-        result = adapter.get_result(jid)
+
+    def _poll(jid_: str) -> "music_base.GenResult":
+        r = adapter.get_result(jid_)
         waited = 0.0
-        while result.status == "running" and waited < GEN_TIMEOUT_S:
+        while r.status == "running" and waited < GEN_TIMEOUT_S:
             time.sleep(3)
             waited += 3
             ctx.progress(min(85, 20 + int(waited / max(1, 60))), f"{who} 生成中 {int(waited)}s")
-            result = adapter.get_result(jid)
+            r = adapter.get_result(jid_)
+        return r
+
+    try:
+        # 续跑优先：上一次执行已经把任务提交给上游了（很可能已经计费），
+        # 这里只把请求重新绑上再继续轮询，**绝不重新提交**。
+        # 判据是落库的 provider_job_id —— 它在提交成功后立即写盘，
+        # 所以即使进程重启、换 worker 线程，也能接上原来的任务。
+        resumed = bool(cand.provider_job_id) and not cand.is_mock
+        if resumed:
+            jid = cand.provider_job_id
+            adapter.attach_request(jid, req)
+            ctx.progress(15, f"{who} 续跑（复用上游任务，不重复计费）")
+        else:
+            jid = adapter.generate(req)
+            cand.provider_job_id = jid
+            db.commit()          # 立刻落库：迟一步就可能在重试时重提交、重复计费
+        try:
+            result = _poll(jid)
+        except Exception:
+            # 续跑时上游任务号已失效（过期/被上游清理）→ 清掉它，重提交一次兜底。
+            # 首次提交失败则原样抛出，避免误吞真实错误。
+            if not resumed:
+                raise
+            log.warning("上游任务 %s 查询失败，改为重新提交", jid)
+            cand.provider_job_id = ""
+            db.commit()
+            jid = adapter.generate(req)
+            cand.provider_job_id = jid
+            db.commit()
+            result = _poll(jid)
         if result.status != "done" or not result.audio_path:
             raise RuntimeError(result.error or f"{adapter.name} 生成未完成")
 
@@ -166,6 +196,9 @@ def h_music_one(ctx: JobContext) -> None:
         cand.cost = float(result.cost or adapter.estimate_cost(req))
         cand.elapsed_s = round(time.time() - t0, 2)
         cand.status = "done"
+        # 清掉上一次失败留下的报错：否则候选明明已经出片、卡片上却还挂着
+        # 「ReadTimeout」之类的旧错误，用户会以为改坏了（线上真发生过）。
+        cand.error = ""
         db.commit()
 
         # 匹配分只依据客观参数打分。V1.0 把模型名也喂给了 LLM —— 既可能带入品牌偏好，
