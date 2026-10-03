@@ -259,6 +259,8 @@ export const api = {
     if (body.provider) q.set('provider', body.provider)
     return post(`/api/projects/${id}/storyboard/shots/${shotId}/regenerate?${q}`, {})
   },
+  storyboardRevert: (id: string, shotId: string) =>
+    post(`/api/projects/${id}/storyboard/shots/${shotId}/revert`, {}),
   storyboardApproveAll: (id: string) => post(`/api/projects/${id}/storyboard/approve-all`, {}),
   /** 一键通过机器预审「建议通过」的句子 */
   storyboardApproveSuggested: (id: string) => post(`/api/projects/${id}/storyboard/approve-suggested`, {}),

@@ -17,6 +17,8 @@ export default function ReviewPager({
   onApprove,
   onReject,
   onRegen,
+  onRevert,
+  providers = [],
   onEditPrompt,
   onUpload,
   onUseLibrary,
@@ -27,7 +29,10 @@ export default function ReviewPager({
   readOnly?: boolean
   onApprove: (s: any) => Promise<void>
   onReject: (s: any) => Promise<void>
-  onRegen: (s: any) => void
+  /** 逐句选模型重出：provider 为空时用页面上方选中的默认模型 */
+  onRegen: (s: any, provider?: string) => void
+  onRevert?: (s: any) => void
+  providers?: any[]
   onEditPrompt: (s: any) => void
   onUpload: (s: any) => void
   onUseLibrary: (s: any) => Promise<void>
@@ -174,10 +179,35 @@ export default function ReviewPager({
                 不行（N）
               </button>
             </div>
+            {cur.prev_image_url && (
+              <div className="flex items-center gap-2 border border-line rounded-btn p-1.5">
+                <img src={cur.prev_image_url} alt="上一版" className="w-20 h-12 object-cover rounded border border-line" />
+                <span className="text-[10px] text-ink-faint flex-1">上一版（可对比）</span>
+                {onRevert && (
+                  <button className="btn btn-sm" disabled={!!busy || readOnly} onClick={() => onRevert(cur)}>
+                    用回上一版
+                  </button>
+                )}
+              </div>
+            )}
+            {providers.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[11px] text-ink-faint">换模型重出：</span>
+                {providers.map((x) => (
+                  <button
+                    key={x.key}
+                    className={clsx('btn btn-sm', cur.provider === x.key && 'ring-1 ring-brand/40')}
+                    disabled={!!busy || readOnly || !x.ready}
+                    title={x.ready ? `${x.model} · ${x.size}` : x.note}
+                    onClick={() => onRegen(cur, x.key)}
+                  >
+                    {x.label}
+                    {!x.ready && '（未配置）'}
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="flex flex-wrap gap-1.5">
-              <button className="btn btn-sm" disabled={!!busy || readOnly} onClick={() => onRegen(cur)}>
-                重新出一张
-              </button>
               <button className="btn btn-sm" disabled={!!busy || readOnly} onClick={() => onEditPrompt(cur)}>
                 改描述再出
               </button>

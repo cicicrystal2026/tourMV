@@ -596,3 +596,49 @@ def test_worklog_review_and_selection_report(client):
     assert md.status_code == 200 and "选型结论" in md.text and "PRD 要求 ≥ 6 轮" in md.text
     csv_ = client.get("/api/music/selection-report?format=csv")
     assert csv_.status_code == 200 and csv_.text.startswith("选型轮")
+
+
+def test_per_shot_model_switch_and_revert(client, has_real_db, monkeypatch):
+    """逐句换模型重出 → 不满意用回上一版（来源标签跟着回去，不花钱）。"""
+    if not has_real_db:
+        pytest.skip("没有真实库备份")
+    import shutil
+
+    from app.adapters import image as image_ad
+    from app.db import SessionLocal
+    from app.models import StoryboardShot
+    from app.services import storyboard as sbs
+
+    provs = {x["key"]: x for x in client.get(f"/api/projects/{CHANGBAI}/storyboard").json()["providers"]}
+    assert {"wanx", "seedream", "jimeng"} <= set(provs)
+    if not provs["jimeng"]["ready"]:
+        assert "VOLC_ACCESS_KEY" in provs["jimeng"]["note"]
+
+    client.post(f"/api/projects/{CHANGBAI}/storyboard/plan?force=true")
+    client.post(f"/api/projects/{CHANGBAI}/storyboard/generate")
+    with SessionLocal() as db:
+        row = db.query(StoryboardShot).filter(StoryboardShot.project_id == CHANGBAI,
+                                              StoryboardShot.dup_of == 0,
+                                              StoryboardShot.image_path != "").order_by(StoryboardShot.order).first()
+        sid, rev0, src0 = row.id, row.rev, row.provider
+        old_img, old_clip = row.image_path, row.clip_path
+
+    def fake_render(row, p, provider):
+        img, clip, thumb = sbs._image_paths(row)
+        shutil.copy(old_img, img)
+        shutil.copy(old_clip, clip)
+        return img, clip, thumb, ""
+    monkeypatch.setattr(image_ad, "available", lambda *a, **k: True)
+    monkeypatch.setattr(sbs, "_render_one", fake_render)
+    monkeypatch.setattr(sbs, "_apply_judge", lambda *a, **k: None)
+    monkeypatch.setattr(sbs, "_suggest_real", lambda *a, **k: None)
+    with SessionLocal() as db:
+        sbs.regenerate(db, sid, provider="jimeng")
+    it = {i["id"]: i for i in client.get(f"/api/projects/{CHANGBAI}/storyboard").json()["items"]}[sid]
+    assert it["rev"] == rev0 + 1 and it["provider"] == "jimeng" and it["source_label"] == "AI 生成·即梦"
+    assert it["prev_image_url"]
+
+    r = client.post(f"/api/projects/{CHANGBAI}/storyboard/shots/{sid}/revert")
+    assert r.status_code == 200, r.text
+    it = {i["id"]: i for i in client.get(f"/api/projects/{CHANGBAI}/storyboard").json()["items"]}[sid]
+    assert it["rev"] == rev0 and it["provider"] == src0 and it["status"] == "pending"

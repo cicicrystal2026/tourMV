@@ -70,6 +70,9 @@ class Settings:
         # 或 seedream（火山方舟 Seedream，需 ARK_API_KEY）。
         self.image_provider = os.environ.get("IMAGE_PROVIDER", "wanx")
         self.ark_api_key = os.environ.get("ARK_API_KEY", "")
+        # 即梦（火山引擎视觉智能）用账号 AK/SK 签名，不是方舟的 API Key
+        self.volc_access_key = os.environ.get("VOLC_ACCESS_KEY", "")
+        self.volc_secret_key = os.environ.get("VOLC_SECRET_KEY", "")
         # 逐句出图是长任务（一句一张），并行几张能显著缩短等待
         self.image_concurrency = int(os.environ.get("IMAGE_CONCURRENCY", "3"))
         # 汇率（用于把各家美元单价折成人民币做成本估算）

@@ -215,19 +215,26 @@ export default function StoryboardPage() {
             >
               一键全部通过
             </button>
+            {['audio_analyzing', 'rough_cutting', 'edit_review', 'rendering'].includes(p.status) ? (
+              // 已经确认过配图：主按钮换成去下一站，避免「点了没反应」——V1.0 确认后仍停在本页、按钮只是变灰
+              <button className="btn-human" onClick={() => nav(`/projects/${projectId}/edit`)}>
+                {['audio_analyzing', 'rough_cutting'].includes(p.status) ? '卡点合成中，去剪辑工作台 →' : '去剪辑工作台 →'}
+              </button>
+            ) : (
             <button
               className="btn-human"
               disabled={!!busy || p.status !== 'storyboard_review' || !gate.ok}
               title={p.status !== 'storyboard_review' ? '当前不在「待审配图」阶段' : gate.reasons.join('；')}
               onClick={() =>
                 act('advance', () => api.advance(projectId!), () => {
-                  setMsg('配图已确认，进入卡点合成')
-                  load(projectId!)
+                  // 确认后直接带去剪辑工作台：节拍检测与粗剪在那里显示进度
+                  nav(`/projects/${projectId}/edit`)
                 })
               }
             >
-              确认配图，进入卡点
+              {busy === 'advance' ? '提交中…' : '确认配图，进入卡点'}
             </button>
+            )}
           </>
           )
         }
@@ -330,9 +337,17 @@ export default function StoryboardPage() {
             readOnly={locked}
             onApprove={(s) => act(`ap-${s.id}`, () => api.storyboardApprove(projectId!, s.id), () => load(projectId!))}
             onReject={(s) => act(`rj-${s.id}`, () => api.storyboardReject(projectId!, s.id), () => load(projectId!))}
-            onRegen={(s) =>
-              act(`rg-${s.id}`, () => api.storyboardRegenerate(projectId!, s.id, { provider }), () => {
-                setMsg('已开始重出这一张，稍等自动刷新')
+            providers={providers}
+            onRegen={(s, pk) =>
+              act(`rg-${s.id}`, () => api.storyboardRegenerate(projectId!, s.id, { provider: pk || provider }), () => {
+                const label = providers.find((x) => x.key === (pk || provider))?.label || ''
+                setMsg(`第 ${s.order} 句已用「${label}」重出，稍等自动刷新；不满意可点「用回上一版」`)
+                load(projectId!)
+              })
+            }
+            onRevert={(s) =>
+              act(`rv-${s.id}`, () => api.storyboardRevert(projectId!, s.id), () => {
+                setMsg(`第 ${s.order} 句已用回上一版画面`)
                 load(projectId!)
               })
             }
@@ -372,15 +387,23 @@ export default function StoryboardPage() {
                 onReject={() =>
                   act(`rj-${s.id}`, () => api.storyboardReject(projectId!, s.id), () => load(projectId!))
                 }
-                onRegen={() =>
+                providers={providers}
+                onRegen={(pk) =>
                   act(
                     `rg-${s.id}`,
-                    () => api.storyboardRegenerate(projectId!, s.id, { provider }),
+                    () => api.storyboardRegenerate(projectId!, s.id, { provider: pk }),
                     () => {
-                      setMsg('已入队重生成，稍等自动刷新')
+                      const label = providers.find((x) => x.key === pk)?.label || pk
+                      setMsg(`第 ${s.order} 句已用「${label}」重出，稍等自动刷新；不满意可点「用回上一版」`)
                       load(projectId!)
                     },
                   )
+                }
+                onRevert={() =>
+                  act(`rv-${s.id}`, () => api.storyboardRevert(projectId!, s.id), () => {
+                    setMsg(`第 ${s.order} 句已用回上一版画面`)
+                    load(projectId!)
+                  })
                 }
                 onEditPrompt={() => {
                   setEditShot(s)
@@ -479,6 +502,8 @@ function ShotCard({
   onApprove,
   onReject,
   onRegen,
+  onRevert,
+  providers,
   onEditPrompt,
   onUpload,
 }: {
@@ -488,11 +513,15 @@ function ShotCard({
   busy: string
   onApprove: () => void
   onReject: () => void
-  onRegen: () => void
+  /** 逐句选模型重出：同一句可以换不同模型多出几版，挑效果最好的 */
+  onRegen: (provider: string) => void
+  onRevert: () => void
+  providers: any[]
   onEditPrompt: () => void
   onUpload: () => void
 }) {
   const done = shot.status === 'approved'
+  const [menu, setMenu] = useState(false)
   return (
     <div
       className={clsx(
@@ -548,6 +577,14 @@ function ShotCard({
             className="w-14 h-9 object-cover rounded border border-line"
           />
           <span className="text-[10px] text-ink-faint">← 上一版，可对比</span>
+          <button
+            className="ml-auto text-[11px] text-brand underline disabled:opacity-50"
+            disabled={!!busy}
+            onClick={onRevert}
+            title="新出的不如上一版？切回去，不花钱"
+          >
+            用回上一版
+          </button>
         </div>
       )}
 
@@ -588,8 +625,8 @@ function ShotCard({
           <button className="btn btn-sm" disabled={!!busy} onClick={onEditPrompt}>
             改提示词
           </button>
-          <button className="btn btn-sm" disabled={!!busy} onClick={onRegen}>
-            换模型重出
+          <button className="btn btn-sm" disabled={!!busy} onClick={() => setMenu((v) => !v)}>
+            换模型重出 {menu ? '▴' : '▾'}
           </button>
           <button className="btn btn-sm" disabled={!!busy} onClick={onUpload}>
             上传我的图
@@ -600,6 +637,28 @@ function ShotCard({
             </button>
           )}
         </div>
+        {menu && (
+          <div className="flex flex-col gap-1 border border-line rounded-btn p-2 bg-page">
+            <div className="text-[10px] text-ink-faint">用哪个模型重出这一句？（当前：{shot.source_label || '—'}）</div>
+            {providers.map((x) => (
+              <button
+                key={x.key}
+                className="btn btn-sm justify-between disabled:opacity-50"
+                disabled={!!busy || !x.ready}
+                title={x.ready ? `${x.model} · ${x.size}` : x.note}
+                onClick={() => {
+                  setMenu(false)
+                  onRegen(x.key)
+                }}
+              >
+                <span>{x.label}</span>
+                <span className="text-[10px] text-ink-faint">
+                  {x.ready ? (shot.provider === x.key ? '同模型再出一版' : x.size) : '未配置'}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )

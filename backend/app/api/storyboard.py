@@ -122,6 +122,15 @@ def regenerate(project_id: str, shot_id: str, prompt: str = "", provider: str = 
     return {"queued": True, "job_id": j.id}
 
 
+@router.post("/shots/{shot_id}/revert")
+def revert(project_id: str, shot_id: str, db: Session = Depends(get_db)) -> dict:
+    """用回上一版画面（逐句换模型对比后，留效果最好的那版）。"""
+    try:
+        return svc.revert(db, shot_id)
+    except ProjectError as e:
+        _fail(e)
+
+
 @router.post("/shots/{shot_id}/upload")
 async def upload(project_id: str, shot_id: str,
                  file: UploadFile = File(...),

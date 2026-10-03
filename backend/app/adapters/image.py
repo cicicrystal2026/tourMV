@@ -7,7 +7,8 @@
 | key | 厂商 | Key 环境变量 | 说明 |
 |---|---|---|---|
 | `wanx` | 通义万相（DashScope） | `LLM_API_KEY` | 和 LLM 同一个 Key，无需另申请 |
-| `seedream` | Seedream / 即梦（火山方舟） | `ARK_API_KEY` | 写实感与中文场景理解更强，需自行申请 |
+| `seedream` | 豆包 Seedream 4.0（火山方舟） | `ARK_API_KEY` | 写实感与中文场景理解更强，支持 2K |
+| `jimeng` | 即梦 AI 图片生成（火山引擎视觉智能） | `VOLC_ACCESS_KEY` + `VOLC_SECRET_KEY` | 即梦同源模型，AK/SK 签名调用 |
 
 ⚠️ 分辨率上限（实测）：万相 **宽或高必须落在 512–1440**，所以 16:9 最大只能
 `1440*810`；出图后由 `media.image_to_clip` 放大到 1920×1080（并做一次锐化补偿）。
@@ -51,13 +52,31 @@ PROVIDERS: dict[str, dict] = {
         "price_cny": 0.20,     # 元/张（官方刊例价），可用 WANX_IMAGE_PRICE 覆盖
     },
     "seedream": {
-        "label": "Seedream 即梦",
-        "model": "doubao-seedream-3-0-t2i-250415",
-        "size": "2048x1152",
+        "label": "豆包 Seedream",
+        # 4.0 起写实质感明显好于 3.0，并支持 2K；模型 ID 以方舟控制台「模型推理」为准，
+        # 可用 SEEDREAM_IMAGE_MODEL 覆盖（如账号里开通的是 3.0 / 4.5）
+        "model": "doubao-seedream-4-0-250828",
+        "size": "2560x1440",
         "key_attr": "ark_api_key",
-        "price_cny": 0.259,
+        "env": "ARK_API_KEY",
+        "price_cny": 0.20,
+    },
+    "jimeng": {
+        "label": "即梦",
+        # 火山引擎视觉智能「即梦AI-图片生成」：model 字段即 req_key，
+        # 可用 JIMENG_IMAGE_MODEL 覆盖（如 jimeng_t2i_v31）
+        "model": "jimeng_t2i_v40",
+        "size": "2560x1440",
+        "key_attr": "volc_access_key",
+        "env": "VOLC_ACCESS_KEY + VOLC_SECRET_KEY",
+        "price_cny": 0.20,
     },
 }
+PROVIDERS["wanx"]["env"] = "LLM_API_KEY"
+
+
+def _env_hint(key: str) -> str:
+    return _cfg(key).get("env", "")
 
 
 def price(key: str | None = None) -> float:
@@ -93,7 +112,10 @@ def image_size(key: str | None = None) -> str:
 
 def _key(key: str | None = None) -> str:
     key = key or default_provider()
-    return getattr(settings(), _cfg(key)["key_attr"], "") or ""
+    v = getattr(settings(), _cfg(key)["key_attr"], "") or ""
+    if key == "jimeng" and not settings().volc_secret_key:
+        return ""     # 即梦要 AK、SK 两个都有
+    return v
 
 
 def available(key: str | None = None) -> bool:
@@ -105,8 +127,7 @@ def note(key: str | None = None) -> str:
     key = key or default_provider()
     cfg = _cfg(key)
     if not _key(key):
-        env = "LLM_API_KEY" if key == "wanx" else "ARK_API_KEY"
-        return f"未配置：填 {env} 后才能用于出图。"
+        return f"未配置：填 {_env_hint(key)} 后才能用于出图。"
     return f"{cfg['label']}（{model_name(key)}）：{image_size(key)}，按张计费。"
 
 
@@ -134,8 +155,7 @@ def text_to_image(prompt: str, out_path: str | Path, *,
 
     key = provider or default_provider()
     if not available(key):
-        env = "LLM_API_KEY" if key == "wanx" else "ARK_API_KEY"
-        raise RuntimeError(f"{_cfg(key)['label']} 未就绪：需要 {env} 且 FORCE_MOCK=0")
+        raise RuntimeError(f"{_cfg(key)['label']} 未就绪：需要 {_env_hint(key)} 且 FORCE_MOCK=0")
 
     full = prompt if "写实纪实摄影" in prompt else (prompt.rstrip("。") + REALISM_SUFFIX)
     out_path = Path(out_path)
@@ -148,6 +168,8 @@ def text_to_image(prompt: str, out_path: str | Path, *,
         try:
             if key == "seedream":
                 _seedream(full, out_path, size=size, timeout_s=timeout_s)
+            elif key == "jimeng":
+                _jimeng(full, out_path, size=size, timeout_s=timeout_s)
             else:
                 _wanx(full, out_path, size=size, negative=negative, timeout_s=timeout_s)
             # 只有成功出图才计费（失败的任务上游不收费）
@@ -219,8 +241,8 @@ def _seedream(prompt: str, out_path: Path, *, size: str, timeout_s: int) -> None
     """火山方舟 Seedream，同步返回（url 或 b64_json）。
 
     注：**未拿到 Key 前无法实测**，字段按官方文档写。
-    真接上后若报参数错误，优先核对 `SEEDREAM_IMAGE_MODEL` 与尺寸格式
-    （Seedream 用 `1024x1024` 这种 x 分隔，且 3.0 只支持固定几档尺寸）。
+    真接上后若报参数错误，优先核对 `SEEDREAM_IMAGE_MODEL`（须是账号已开通的模型 ID）
+    与尺寸（4.0 用 `2560x1440` 这种 x 分隔；3.0 只支持固定几档，如 `1280x720`）。
     """
     base = os.environ.get(
         "ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/")
@@ -235,6 +257,8 @@ def _seedream(prompt: str, out_path: Path, *, size: str, timeout_s: int) -> None
         "response_format": "url",
         "watermark": False,
     }
+    if "seedream-3" not in body["model"]:
+        body["sequential_image_generation"] = "disabled"   # 4.x：只要一张
     r = requests.post(f"{base}/images/generations", headers=headers, json=body,
                       timeout=max(120, min(timeout_s, 600)))
     if r.status_code >= 400:
@@ -250,6 +274,111 @@ def _seedream(prompt: str, out_path: Path, *, size: str, timeout_s: int) -> None
     if not url:
         raise RuntimeError(f"Seedream 未返回 url：{str(item)[:200]}")
     _fetch(url, out_path)
+
+
+# ------------------------------------------------------------ 即梦（火山引擎视觉智能，异步）
+_VOLC_HOST = "visual.volcengineapi.com"
+_VOLC_REGION = "cn-north-1"
+_VOLC_SERVICE = "cv"
+_VOLC_VERSION = "2022-08-31"
+
+
+def _volc_sign(ak: str, sk: str, host: str, query: dict, payload: bytes, x_date: str) -> dict:
+    """火山引擎 OpenAPI 的 HMAC-SHA256 V4 签名（与官方 SDK 算法一致），返回请求头。"""
+    import hashlib
+    import hmac
+    from urllib.parse import quote
+
+    short_date = x_date[:8]
+    canonical_query = "&".join(f"{quote(k, safe='-_.~')}={quote(str(v), safe='-_.~')}"
+                               for k, v in sorted(query.items()))
+    body_hash = hashlib.sha256(payload).hexdigest()
+    signed_headers = "content-type;host;x-content-sha256;x-date"
+    canonical_headers = (f"content-type:application/json\nhost:{host}\n"
+                         f"x-content-sha256:{body_hash}\nx-date:{x_date}\n")
+    canonical_request = "\n".join(["POST", "/", canonical_query, canonical_headers,
+                                   signed_headers, body_hash])
+    scope = f"{short_date}/{_VOLC_REGION}/{_VOLC_SERVICE}/request"
+    string_to_sign = "\n".join(["HMAC-SHA256", x_date, scope,
+                                hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()])
+
+    def _h(key: bytes, msg: str) -> bytes:
+        return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
+    k = _h(sk.encode("utf-8"), short_date)
+    for part in (_VOLC_REGION, _VOLC_SERVICE, "request"):
+        k = _h(k, part)
+    signature = hmac.new(k, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+    return {
+        "Content-Type": "application/json",
+        "Host": host,
+        "X-Date": x_date,
+        "X-Content-Sha256": body_hash,
+        "Authorization": (f"HMAC-SHA256 Credential={ak}/{scope}, "
+                          f"SignedHeaders={signed_headers}, Signature={signature}"),
+        "_query": canonical_query,
+    }
+
+
+def _volc_call(action: str, body: dict, timeout: int = 60) -> dict:
+    import datetime
+    import json as _json
+
+    s = settings()
+    host = os.environ.get("VOLC_VISUAL_HOST", _VOLC_HOST)
+    payload = _json.dumps(body, ensure_ascii=False).encode("utf-8")
+    x_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    headers = _volc_sign(s.volc_access_key, s.volc_secret_key, host,
+                         {"Action": action, "Version": _VOLC_VERSION}, payload, x_date)
+    query = headers.pop("_query")
+    r = requests.post(f"https://{host}/?{query}", headers=headers, data=payload, timeout=timeout)
+    try:
+        j = r.json()
+    except ValueError:
+        raise RuntimeError(f"即梦 HTTP {r.status_code}: {r.text[:300]}") from None
+    err = (j.get("ResponseMetadata") or {}).get("Error") or {}
+    if r.status_code >= 400 or err or j.get("code") not in (None, 10000):
+        msg = err.get("Message") or j.get("message") or r.text[:300]
+        raise RuntimeError(f"即梦 HTTP {r.status_code}: {j.get('code', '')} {msg}"[:400])
+    return j.get("data") or {}
+
+
+def _jimeng(prompt: str, out_path: Path, *, size: str, timeout_s: int) -> None:
+    """即梦 AI 图片生成：提交任务 → 轮询结果（图片 URL 或 base64）。
+
+    注：**未拿到 AK/SK 前无法实测**，字段按官方文档写；报参数错误时先核对
+    `JIMENG_IMAGE_MODEL`（即 req_key，须是账号已开通的能力）与尺寸。
+    """
+    req_key = model_name("jimeng")
+    w, _, h = size.lower().partition("x")
+    task = _volc_call("CVSync2AsyncSubmitTask", {
+        "req_key": req_key, "prompt": prompt[:800],
+        "width": int(w or 2560), "height": int(h or 1440),
+    })
+    task_id = task.get("task_id")
+    if not task_id:
+        raise RuntimeError(f"即梦未返回 task_id：{str(task)[:200]}")
+    deadline = time.time() + max(60, timeout_s)
+    while time.time() < deadline:
+        time.sleep(POLL_INTERVAL)
+        d = _volc_call("CVSync2AsyncGetResult", {
+            "req_key": req_key, "task_id": task_id,
+            "req_json": '{"return_url":true,"logo_info":{"add_logo":false}}',
+        })
+        st = d.get("status")
+        if st == "done":
+            urls = d.get("image_urls") or []
+            if urls:
+                _fetch(urls[0], out_path)
+                return
+            b64 = d.get("binary_data_base64") or []
+            if b64:
+                out_path.write_bytes(base64.b64decode(b64[0]))
+                return
+            raise RuntimeError("即梦任务完成但没有返回图片（可能被内容审核拦截）")
+        if st in ("not_found", "expired"):
+            raise RuntimeError(f"即梦任务 {st}")
+    raise RuntimeError(f"即梦出图超时（>{timeout_s}s）")
 
 
 def _fetch(url: str, dest: Path) -> None:

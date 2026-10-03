@@ -142,6 +142,11 @@ def _asset_for_shot(db: Session, row: StoryboardShot, p: Project, *, img: Path,
     """把审核用的图登记成素材库资产（可被卡点引用）。"""
     name = f"{row.place}（第{row.order}句）"[:200]
     a = db.get(Asset, row.asset_id) if row.asset_id else None
+    # 只复用本句自己登记的 AI 资产。上一版若来自素材库（实拍 / 演示素材），
+    # row.asset_id 指向的是库里的那条资产，绝不能拿来改写成 AI 画面。
+    own = Path(settings().data_dir / "assets" / "storyboard").resolve()
+    if a is not None and not (a.source == "ai" and own in Path(a.file_path or "").resolve().parents):
+        a = None
     if a is None:
         a = Asset(name=name)
         db.add(a)
@@ -153,7 +158,7 @@ def _asset_for_shot(db: Session, row: StoryboardShot, p: Project, *, img: Path,
     a.width, a.height, a.fps = 1920, 1080, 25.0
     a.source = "ai"
     a.license_status = "ai_generated"
-    a.licensor = "AI 生成（通义万相）" if provider == "wanx" else "AI 生成（Seedream）"
+    a.licensor = f"AI 生成（{image_ad.PROVIDERS.get(provider, {}).get('label', provider)}）"
     a.license_no = f"AI-SB-{date.today().strftime('%Y%m%d')}"
     a.scope = "线上投放（含海外平台）"
     a.valid_until = ""
@@ -233,11 +238,11 @@ def _render_one(row: StoryboardShot, p: Project, provider: str
 # AI 画面占比 30% 只作提醒（看板 / 审核页显示），不做硬拦截。
 SOURCE_LABEL = {
     "library": "素材库实拍", "library_ai": "复用素材库 AI 画面", "library_seed": "演示素材（非实拍）",
-    "wanx": "AI 生成·通义万相", "seedream": "AI 生成·Seedream",
+    "wanx": "AI 生成·通义万相", "seedream": "AI 生成·豆包 Seedream", "jimeng": "AI 生成·即梦",
     "placeholder": "占位画面（演示模式）", "upload": "用户上传",
     "borrowed": "沿用前句画面（AI 出图失败）",
 }
-AI_SOURCES = {"wanx", "seedream", "library_ai", "borrowed"}
+AI_SOURCES = {"wanx", "seedream", "jimeng", "library_ai", "borrowed"}
 # 预审分数 ≥ 该值标「建议通过」，人只需抽查；低于的标红、必须人看
 SUGGEST_PASS = 75
 
@@ -659,6 +664,7 @@ def regenerate(db: Session, shot_id: str, *, prompt: str | None = None,
         raise ProjectError(f"{provider} 未就绪：{image_ad.note(provider)}")
     if prompt is not None and prompt.strip():
         row.prompt = prompt.strip()[:1500]
+    _write_rev_meta(row)
     row.rev += 1
     row.status = "generating"
     row.error = ""
@@ -688,6 +694,7 @@ def regenerate(db: Session, shot_id: str, *, prompt: str | None = None,
     if note:
         row.note = note
     row.provider, row.model = provider, image_ad.model_name(provider)
+    _write_rev_meta(row)
     a = _asset_for_shot(db, row, p, img=img, clip=clip, thumb=thumb, provider=provider)
     row.asset_id = a.id
     row.status = "pending"
@@ -697,6 +704,85 @@ def regenerate(db: Session, shot_id: str, *, prompt: str | None = None,
     # 重出的图同样先过机器预审，并重新找可替换的实拍
     _apply_judge(db, [row], p)
     _suggest_real(db, p, [row])
+    sync_dups(db, row)
+    db.commit()
+    return {"id": row.id, "status": row.status, "rev": row.rev, "image_url": _img_url(row)}
+
+
+def _rev_meta_path(row: StoryboardShot, rev: int) -> Path:
+    return settings().data_dir / "storyboard" / f"{_slug(row.place, rev)}.meta.json"
+
+
+def _write_rev_meta(row: StoryboardShot) -> None:
+    """记下某一版画面是哪个模型出的（文件名只带 rev，不带模型）。"""
+    import json
+
+    if not row.image_path:
+        return
+    try:
+        _rev_meta_path(row, row.rev).write_text(
+            json.dumps({"provider": row.provider or "", "model": row.model or "",
+                        "prompt": row.prompt or "", "image_path": row.image_path or "",
+                        "clip_path": row.clip_path or "", "asset_id": row.asset_id or "",
+                        "note": row.note or ""}, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _read_rev_meta(row: StoryboardShot, rev: int) -> dict:
+    import json
+
+    try:
+        return json.loads(_rev_meta_path(row, rev).read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _prev_files(row: StoryboardShot) -> tuple[Path, Path, dict] | None:
+    """上一版的画面与片段：优先按记录（可能来自素材库），没有记录再按 rev 命名推算。"""
+    if row.rev <= 0:
+        return None
+    meta = _read_rev_meta(row, row.rev - 1)
+    if meta.get("image_path") and meta.get("clip_path"):
+        img, clip = Path(meta["image_path"]), Path(meta["clip_path"])
+    else:
+        row.rev -= 1
+        img, clip, _ = _image_paths(row)
+        row.rev += 1
+    if not img.exists() or not clip.exists():
+        return None
+    return img, clip, meta
+
+
+def revert(db: Session, shot_id: str) -> dict:
+    """用回上一版（换模型重出后觉得不如原来的）：上一版的文件都还在，切回去即可，不花钱。"""
+    row = _master(db, shot_id)
+    p = get_project(db, row.project_id)
+    if row.rev <= 0:
+        raise ProjectError("这一句没有上一版")
+    prev = _prev_files(row)
+    if prev is None:
+        raise ProjectError("上一版的画面文件已不存在，无法用回")
+    img, clip, meta = prev
+    row.rev -= 1
+    row.image_path, row.clip_path = str(img), str(clip)
+    if meta.get("provider"):
+        row.provider, row.model = meta["provider"], meta.get("model", "")
+    lib = db.get(Asset, meta["asset_id"]) if meta.get("asset_id") else None
+    if row.provider in image_ad.PROVIDERS or lib is None:
+        # 上一版是 AI 出图：把本句的 AI 资产指回旧文件（卡点合成用的是资产）
+        _, _, thumb = _image_paths(row)
+        row.asset_id = _asset_for_shot(db, row, p, img=img, clip=clip, thumb=thumb,
+                                       provider=row.provider or "").id
+    else:
+        row.asset_id = lib.id      # 上一版来自素材库：直接指回那条资产，不改动它
+    row.status = "pending"
+    row.error = ""
+    row.note = (meta.get("note") or "") if row.provider not in image_ad.PROVIDERS else "已用回上一版画面"
+    row.ai_score, row.ai_reason = -1, ""
+    db.commit()
+    if row.provider in image_ad.PROVIDERS:
+        _apply_judge(db, [row], p)
     sync_dups(db, row)
     db.commit()
     return {"id": row.id, "status": row.status, "rev": row.rev, "image_url": _img_url(row)}
@@ -774,16 +860,15 @@ def _thumb_url(row: StoryboardShot) -> str:
 
 
 def _prev_image_url(row: StoryboardShot) -> str:
-    """上一版的图（用于「换模型重出」后和新图并排对比）。
+    """上一版的图（用于「换模型重出」后和新图并排对比、以及「用回上一版」）。
 
-    文件名本来就带 rev，重生成时写的是新文件名、不覆盖旧文件，
-    所以这里不需要额外存字段，直接按 rev-1 推算并确认文件还在。
+    重生成写的是新文件名、不覆盖旧文件；上一版若来自素材库则按记录里的路径找。
     """
     from ..serialize import media_url
-    if row.rev <= 0:
+    prev = _prev_files(row)
+    if prev is None:
         return ""
-    prev = settings().data_dir / "storyboard" / f"{_slug(row.place, row.rev - 1)}.jpg"
-    return media_url("storyboard", str(prev)) if prev.exists() else ""
+    return media_url("storyboard", str(prev[0]))   # 画面统一落在 data/storyboard（素材库镜头也会抽帧到这里）
 
 
 def progress(db: Session, project_id: str) -> dict:
