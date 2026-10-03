@@ -642,3 +642,30 @@ def test_per_shot_model_switch_and_revert(client, has_real_db, monkeypatch):
     assert r.status_code == 200, r.text
     it = {i["id"]: i for i in client.get(f"/api/projects/{CHANGBAI}/storyboard").json()["items"]}[sid]
     assert it["rev"] == rev0 and it["provider"] == src0 and it["status"] == "pending"
+
+
+def test_regenerate_is_deduped(client, has_real_db):
+    """同一句已有重出任务在排队时，再点不重复入队（E2E：一句被连点 21 次、出了 9 张）。"""
+    if not has_real_db:
+        pytest.skip("没有真实库备份")
+    from app.db import SessionLocal
+    from app.models import Job, StoryboardShot
+
+    with SessionLocal() as db:
+        row = db.query(StoryboardShot).filter(StoryboardShot.project_id == CHANGBAI,
+                                              StoryboardShot.dup_of == 0).first()
+        j = Job(queue="gpu", type="storyboard_generate_one", ref_id=row.id, project_id=CHANGBAI,
+                name="重生成一张配图", status="running", payload={})
+        db.add(j)
+        db.commit()
+        sid, jid = row.id, j.id
+    try:
+        r = client.post(f"/api/projects/{CHANGBAI}/storyboard/shots/{sid}/regenerate?provider=wanx")
+        assert r.status_code == 200, r.text
+        assert r.json()["duplicate"] is True and r.json()["job_id"] == jid
+        it = {i["id"]: i for i in client.get(f"/api/projects/{CHANGBAI}/storyboard").json()["items"]}[sid]
+        assert it["regen_active"] is True
+    finally:
+        with SessionLocal() as db:
+            db.query(Job).filter(Job.id == jid).delete()
+            db.commit()

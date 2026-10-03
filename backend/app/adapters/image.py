@@ -137,6 +137,7 @@ def list_providers() -> list[dict]:
         {
             "key": key, "label": cfg["label"], "model": model_name(key),
             "size": image_size(key), "ready": available(key), "note": note(key),
+            "price": price(key),
         }
         for key, cfg in PROVIDERS.items()
     ]

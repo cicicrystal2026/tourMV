@@ -625,8 +625,13 @@ function ShotCard({
           <button className="btn btn-sm" disabled={!!busy} onClick={onEditPrompt}>
             改提示词
           </button>
-          <button className="btn btn-sm" disabled={!!busy} onClick={() => setMenu((v) => !v)}>
-            换模型重出 {menu ? '▴' : '▾'}
+          <button
+            className="btn btn-sm"
+            disabled={!!busy || shot.regen_active}
+            title={shot.regen_active ? '这一句正在重出，出完会自动刷新（重复点击不会再扣费）' : ''}
+            onClick={() => setMenu((v) => !v)}
+          >
+            {shot.regen_active ? '重出中…' : `换模型重出 ${menu ? '▴' : '▾'}`}
           </button>
           <button className="btn btn-sm" disabled={!!busy} onClick={onUpload}>
             上传我的图
@@ -653,7 +658,9 @@ function ShotCard({
               >
                 <span>{x.label}</span>
                 <span className="text-[10px] text-ink-faint">
-                  {x.ready ? (shot.provider === x.key ? '同模型再出一版' : x.size) : '未配置'}
+                  {x.ready
+                    ? `${shot.provider === x.key ? '同模型再出一版 · ' : ''}约 ¥${(x.price ?? 0).toFixed(2)}/张`
+                    : '未配置'}
                 </span>
               </button>
             ))}

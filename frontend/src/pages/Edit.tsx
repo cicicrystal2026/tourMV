@@ -259,7 +259,7 @@ export default function EditPage() {
             )}
             <button
               className="btn"
-              disabled={!!busy || !tl}
+              disabled={!!busy || !tl || p.status === 'rendering'}
               title="重跑一次语音对齐（ASR），让歌词时间轴与歌声严格同步，然后按新时间轴重新卡点"
               onClick={() => act('align', () => api.realignTimeline(p.id), () => { setMsg('已派发对齐任务（约 1 分钟）'); load(p.id) })}
             >
@@ -267,7 +267,7 @@ export default function EditPage() {
             </button>
             <button
               className="btn"
-              disabled={!!busy || !tl}
+              disabled={!!busy || !tl || p.status === 'rendering'}
               onClick={() => act('resnap', () => api.resnap(p.id), () => { setMsg('已重新自动卡点（保留人工锁定）'); load(p.id) })}
             >
               重新自动卡点
@@ -281,6 +281,12 @@ export default function EditPage() {
               >
                 确认精剪，生成多版本
               </button>
+            )}
+            {p.status === 'rendering' && (
+              // 已确认过精剪：不再有确认按钮，明确告诉用户在合成、合成完自动交付（E2E 反馈「找不到确认入口」）
+              <span className="tag-brand" title="多版本合成完成并通过出片自检后，项目自动进入「已交付」">
+                已确认精剪 · 正在合成 {renders.filter((r) => r.status === 'done').length}/{renders.length} 个版本，完成后自动交付
+              </span>
             )}
           </>
           )

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
@@ -105,7 +106,18 @@ def reject(project_id: str, shot_id: str, note: str = "",
 @router.post("/shots/{shot_id}/regenerate")
 def regenerate(project_id: str, shot_id: str, prompt: str = "", provider: str = "",
                db: Session = Depends(get_db)) -> dict:
-    """驳回重生成一张。走队列 —— 出一张图要 1–2 分钟，不该卡住请求。"""
+    """驳回重生成一张。走队列 —— 出一张图要 1–2 分钟，不该卡住请求。
+
+    同一句已有重出任务在排队/运行时直接返回那个任务，不重复入队、不重复花钱
+    （E2E 实测：按钮入队后马上恢复可点，运营以为没反应连点，一句出了 9 张）。
+    """
+    from ..models import Job
+
+    busy = db.execute(select(Job).where(
+        Job.type == "storyboard_generate_one", Job.ref_id == shot_id,
+        Job.status.in_(("queued", "running")))).scalars().first()
+    if busy is not None:
+        return {"queued": True, "job_id": busy.id, "duplicate": True}
     try:
         _image_budget(db, project_id, 1, provider)
     except ProjectError as e:

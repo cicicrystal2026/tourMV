@@ -197,14 +197,15 @@ export default function ReviewPager({
                   <button
                     key={x.key}
                     className={clsx('btn btn-sm', cur.provider === x.key && 'ring-1 ring-brand/40')}
-                    disabled={!!busy || readOnly || !x.ready}
-                    title={x.ready ? `${x.model} · ${x.size}` : x.note}
+                    disabled={!!busy || readOnly || !x.ready || cur.regen_active}
+                    title={x.ready ? `${x.model} · ${x.size} · 约 ¥${(x.price ?? 0).toFixed(2)}/张` : x.note}
                     onClick={() => onRegen(cur, x.key)}
                   >
                     {x.label}
-                    {!x.ready && '（未配置）'}
+                    {!x.ready ? '（未配置）' : ` ¥${(x.price ?? 0).toFixed(2)}`}
                   </button>
                 ))}
+                {cur.regen_active && <span className="text-[11px] text-brand">重出中…出完自动刷新</span>}
               </div>
             )}
             <div className="flex flex-wrap gap-1.5">

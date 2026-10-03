@@ -915,9 +915,16 @@ def payload(db: Session, project_id: str) -> dict:
         return {"asset_id": a.id, "name": a.name, "licensor": a.licensor, "is_seed": bool(a.is_seed),
                 "thumb_url": media_url("thumbs", a.thumb_path) if a.thumb_path else ""}
 
+    from ..models import Job
+
+    regen_ids = {j.ref_id for j in db.execute(select(Job).where(
+        Job.project_id == project_id, Job.type == "storyboard_generate_one",
+        Job.status.in_(("queued", "running")))).scalars()}
     items = []
     for r in rows:
         items.append({
+            # 这一句正在重出：界面上把重出按钮锁住并显示「重出中」，避免连点重复花钱
+            "regen_active": r.id in regen_ids,
             "dup_of": r.dup_of, "repeats": dup_count.get(r.order, 0),
             "ai_score": None if r.ai_score < 0 else r.ai_score, "ai_reason": r.ai_reason,
             "ai_verdict": ("" if r.ai_score < 0 else ("pass" if r.ai_score >= SUGGEST_PASS else "review")),
