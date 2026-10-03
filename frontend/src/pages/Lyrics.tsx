@@ -695,7 +695,10 @@ export default function LyricsPage() {
                         setMode(k)
                         setVariants(k === 'selection' ? 2 : 1)
                         // 选型轮默认全选可用的参赛模型；生产模式默认只勾一个
-                        const pool = models.filter((m) => (k === 'selection' ? m.in_selection : m.in_production) && m.usable)
+                        // 默认只勾真实就绪的模型；都没就绪（演示模式）才退回可用（占位）模型
+                        const usableIn = models.filter((m) => (k === 'selection' ? m.in_selection : m.in_production) && m.usable)
+                        const readyIn = usableIn.filter((m) => m.ready)
+                        const pool = readyIn.length ? readyIn : usableIn
                         const next: Record<string, boolean> = {}
                         models.forEach((m) => (next[m.key] = false))
                         ;(k === 'selection' ? pool : pool.slice(0, 1)).forEach((m) => (next[m.key] = true))

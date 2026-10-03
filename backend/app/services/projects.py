@@ -180,6 +180,19 @@ def revise(db: Session, project_id: str) -> Project:
         db.add(LV(project_id=p.id, version=1, sections=lv.sections, source="manual",
                   checks_done=False))
         p.status, p.status_note = "lyric_review", "修订版：已复制原歌词，正在重新检查"
+        # 镜头也一并带过来（画面文件与素材资产复用，不重复花生图的钱），
+        # 但状态退回「待审核」：修订版要重新过一遍镜头闸门。歌词若在修订中被改动，
+        # 分镜会被判定为过期并按新歌词重新提炼（见 storyboard.is_stale）。
+        from ..models import StoryboardShot as SS
+
+        for r in db.execute(select(SS).where(SS.project_id == src.id).order_by(SS.order)).scalars():
+            db.add(SS(project_id=p.id, order=r.order, section=r.section, line_no=r.line_no,
+                      line_text=r.line_text, place=r.place, place_note=r.place_note, keywords=r.keywords,
+                      prompt=r.prompt, provider=r.provider, model=r.model, image_path=r.image_path,
+                      clip_path=r.clip_path, asset_id=r.asset_id, rev=r.rev, dup_of=r.dup_of,
+                      ai_score=r.ai_score, ai_reason=r.ai_reason, suggest_asset_id=r.suggest_asset_id,
+                      status="pending" if r.image_path else "draft",
+                      note=f"修订版沿用原项目画面" if r.image_path else ""))
     from . import metrics
 
     metrics.on_transition(db, p.id, "", p.status)
