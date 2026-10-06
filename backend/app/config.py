@@ -89,6 +89,8 @@ class Settings:
         self.vlm_api_key = os.environ.get("VLM_API_KEY", "")
         self.vlm_model = os.environ.get("VLM_MODEL", "qwen-vl-plus")
         self.clip_model = os.environ.get("CLIP_MODEL", "OFA-Sys/chinese-clip-vit-base-patch16")
+        # 实拍镜头「合格」的匹配分阈值（PRD V1.1 F6-2，标定后的 0–1 分）
+        self.match_threshold = float(os.environ.get("MATCH_THRESHOLD", "0.6"))
         # 歌词强制对齐：auto（有 faster-whisper 就用，否则估算）| whisper（强制用）| analytic（关闭）
         # 历史值 mock / whisperx / funasr 一并兼容：mock=关闭，其余=开启。
         self.align_engine = (os.environ.get("ALIGN_ENGINE", "auto") or "auto").strip().lower()

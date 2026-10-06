@@ -106,8 +106,51 @@ def embed_asset(db: Session, asset_id: str) -> None:
         return
     tags = [t.value for t in db.execute(select(AssetTag).where(AssetTag.asset_id == a.id)).scalars()]
     text = " ".join([a.name, a.destination, *tags])
-    a.embedding = clip_ad.encoder.encode_image(a.file_path or a.name, extra_text=text)
+    a.embedding = clip_ad.encoder.encode_asset(_keyframes(a), text)
+    a.embedding_model = clip_ad.encoder.model_id
     db.commit()
+
+
+def _keyframes(a: Asset) -> list[str]:
+    """检索用关键帧：缩略图 + 片段 1/2、3/4 处各一帧（V1.0 直接把 mp4 路径当图片传给编码器）。"""
+    out: list[str] = []
+    if a.thumb_path and Path(a.thumb_path).is_file():
+        out.append(a.thumb_path)
+    fp = Path(a.file_path or "")
+    if fp.is_file() and fp.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
+        out.append(str(fp))
+    elif fp.is_file():
+        d = settings().data_dir / "thumbs" / "_kf"
+        d.mkdir(parents=True, exist_ok=True)
+        dur = float(a.duration_s or 0) or 4.0
+        for k, frac in enumerate((0.5, 0.75)):
+            dst = d / f"{a.id}-{k}.jpg"
+            if not dst.exists():
+                try:
+                    media.make_thumb(fp, dst, at_s=max(0.1, dur * frac))
+                except Exception:  # noqa: BLE001
+                    continue
+            if dst.exists():
+                out.append(str(dst))
+    return out
+
+
+def reembed_stale(db: Session, limit: int | None = None, on_progress=None) -> dict:
+    """把编码器不一致的素材向量全部重算（装上真 Chinese-CLIP 后，旧的哈希向量作废）。"""
+    want = clip_ad.encoder.model_id
+    ids = [a.id for a in db.execute(select(Asset)).scalars() if (a.embedding_model or "hash") != want
+           or not a.embedding]
+    ids = ids[:limit] if limit else ids
+    done = 0
+    for i, aid in enumerate(ids):
+        try:
+            embed_asset(db, aid)
+            done += 1
+        except Exception:  # noqa: BLE001  单条失败不影响其余
+            db.rollback()
+        if on_progress:
+            on_progress(i + 1, len(ids))
+    return {"model": want, "total": len(ids), "done": done}
 
 
 # ------------------------------------------------------------------ 检索
@@ -152,7 +195,7 @@ def search(db: Session, *, q: str = "", filters: dict[str, list[str]] | None = N
 
     scores: dict[str, float] = {}
     if q.strip():
-        order = clip_ad.rank(q, [(a.id, a.embedding or []) for a in rows], top_k=limit)
+        order = clip_ad.rank(q, [(a.id, a.embedding or [], a.embedding_model) for a in rows], top_k=limit)
         scores = dict(order)
         rows = [a for a in rows if a.id in scores]
         rows.sort(key=lambda a: scores.get(a.id, 0), reverse=True)

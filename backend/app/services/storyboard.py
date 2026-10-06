@@ -312,6 +312,18 @@ def _library_pick(db: Session, p: Project, row: StoryboardShot, used: set[str],
         cands.append(a)
     if not cands:
         return None
+    from ..adapters import clip as clip_ad
+
+    if clip_ad.encoder.is_real:
+        # PRD V1.1 F6-2：按画面描述语义检索，匹配分 ≥ 阈值才算合格；不合格宁可走 AI 补位，
+        # 也不拿「同一目的地但画面不相干」的镜头凑数
+        qv = clip_ad.encoder.encode_text(" ".join(x for x in (row.place, row.prompt or row.line_text, row.keywords) if x)[:200])
+        scored = [(a, clip_ad.match_score(clip_ad.cosine(qv, a.embedding)))
+                  for a in cands if a.embedding and clip_ad.comparable(a.embedding_model)]
+        scored = [x for x in scored if x[1] >= settings().match_threshold]
+        return max(scored, key=lambda x: x[1])[0] if scored else None
+
+    # 没有真向量模型时：按关键词命中数挑（只用于跑通流程）
     tags = tag_map(db, [a.id for a in cands])
     toks = _tokens(row)
 

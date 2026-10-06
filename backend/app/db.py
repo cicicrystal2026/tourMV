@@ -113,7 +113,8 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
                         # 上游任务号：提交后立刻落库，任务重试时用它**续跑轮询**而不是
                         # 重新提交。Mureka 按首计费，重提交 = 同一首歌付两次钱。
                         "provider_job_id": "VARCHAR(80) DEFAULT ''"},
-    "asset": {"source": "VARCHAR(10) DEFAULT 'shot'", "is_seed": "BOOLEAN DEFAULT 0"},
+    "asset": {"source": "VARCHAR(10) DEFAULT 'shot'", "is_seed": "BOOLEAN DEFAULT 0",
+              "embedding_model": "VARCHAR(120) DEFAULT ''"},
     "trend_card": {"is_seed": "BOOLEAN DEFAULT 0"},
     "render_job": {"qc": "JSON"},
     "storyboard_shot": {"dup_of": "INTEGER DEFAULT 0", "ai_score": "INTEGER DEFAULT -1",

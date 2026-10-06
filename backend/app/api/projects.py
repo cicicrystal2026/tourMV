@@ -87,7 +87,18 @@ def project_detail(project_id: str, db: Session = Depends(get_db)) -> dict:
         "allow_mock": settings().allow_mock,
         # 选定的曲目是不是占位音频（测试环境里成片会是「嗡嗡声」，界面要明确提示）
         "music_is_mock": _selected_is_mock(db, d["project"]),
+        # 音频分析失败（如对齐不可用）：界面给「重试 / 按字数估算继续」两个出口
+        "analyze_error": _analyze_error(db, d["project"]),
     }
+
+
+def _analyze_error(db, p) -> str:
+    from ..models import Job
+    if p.status != "audio_analyzing":
+        return ""
+    j = db.execute(select(Job).where(Job.project_id == p.id, Job.type == "audio_analyze")
+                   .order_by(Job.created_at.desc()).limit(1)).scalar_one_or_none()
+    return (j.error or "失败") if j is not None and j.status == "failed" else ""
 
 
 def _selected_is_mock(db: Session, p) -> bool:

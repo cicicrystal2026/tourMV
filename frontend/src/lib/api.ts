@@ -178,6 +178,8 @@ export const api = {
   renderVariants: () => get('/api/render/variants'),
   // 重做歌词强制对齐（音画同步）→ 自动按新时间轴重新卡点
   realignTimeline: (id: string) => post(`/api/projects/${id}/timeline/align`),
+  retryAnalyze: (id: string, estimate = false) =>
+    post(`/api/projects/${id}/timeline/analyze?estimate=${estimate ? 'true' : 'false'}`, {}),
   alignStatus: () => get('/api/system/align'),
 
   // 素材

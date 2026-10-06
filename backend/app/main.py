@@ -49,9 +49,36 @@ async def lifespan(app: FastAPI):
     from .services import storyboard as storyboard_svc
     with session_scope() as db:
         storyboard_svc.recover_stuck(db)
+
+    # 加载 Chinese-CLIP（首次还要下载权重）可能要几十秒，放后台线程，不拖慢启动
+    import threading
+
+    def _bg_reembed() -> None:
+        try:
+            with session_scope() as db2:
+                _queue_reembed_if_needed(db2)
+        except Exception as e:  # noqa: BLE001
+            log.warning("向量重建检查失败：%s", e)
+    threading.Thread(target=_bg_reembed, name="reembed-check", daemon=True).start()
     log.info("文旅MV生产管线 backend 就绪：%s", s.data_dir)
     yield
     q.stop()
+
+
+def _queue_reembed_if_needed(db) -> None:
+    """装上（或更换）向量模型后，库里旧编码器产出的向量不可比：后台排一个重建任务。"""
+    from sqlalchemy import select
+
+    from .adapters import clip as clip_ad
+    from .models import Asset, Job
+
+    want = clip_ad.encoder.model_id
+    stale = any((a.embedding_model or "hash") != want for a in db.execute(select(Asset)).scalars())
+    busy = db.execute(select(Job).where(Job.type == "reembed_assets",
+                                        Job.status.in_(("queued", "running")))).first()
+    if stale and not busy:
+        q.enqueue(db, "reembed_assets", queue="gpu", name=f"重建素材向量（{want}）")
+        db.commit()
 
 
 app = FastAPI(title="文旅MV生产管线 V1.0", version="1.0.0", lifespan=lifespan)

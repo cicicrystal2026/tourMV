@@ -765,3 +765,49 @@ def test_mock_lyrics_blocked_and_repeats_merged(client, has_real_db, monkeypatch
         db.delete(ver)
         db.delete(p)
         db.commit()
+
+
+def test_align_failure_is_not_silent(monkeypatch):
+    """F3-1：对齐失败抛错、不重试；只有人明确选择时才按字数估算，并如实标注。"""
+    from app.adapters import align
+    from app.config import settings
+
+    monkeypatch.setattr(type(settings()), "align_enabled", property(lambda s: True))
+
+    def boom(*a, **k):
+        raise RuntimeError("模型文件缺失")
+    monkeypatch.setattr(align, "_whisper_align", boom)
+    with pytest.raises(align.AlignError) as ei:
+        align.align_lyrics("x.mp3", ["第一句歌词", "第二句歌词"], 120.0)
+    assert ei.value.no_retry and "模型文件缺失" in str(ei.value)
+
+    out = align.align_lyrics("x.mp3", ["第一句歌词", "第二句歌词"], 120.0, allow_estimate=True)
+    assert out["engine"] == "analytic" and "人工选择" in out["note"] and len(out["lines"]) == 2
+
+
+def test_static_ai_shot_split_and_beat_snap():
+    """F3-2：AI 静态画面单段 ≤ 8 秒（拆段取不同景别），切点吸附最近强拍。"""
+    from types import SimpleNamespace
+
+    from app.services import edit
+
+    ai = SimpleNamespace(source="ai", duration_s=20.0)
+    beats = [i * 1.0 for i in range(20)]           # 每 1 秒一个强拍（拆分点离强拍都 ≤ 0.5 秒）
+    parts = edit._split_static({"asset": ai, "start": 0.0, "end": 19.0}, beats)
+    assert len(parts) == 3 and all(p["end"] - p["start"] <= 8.0 + 0.5 for p in parts)
+    assert all(p["start"] in beats for p in parts[1:])        # 拆分点落在强拍上
+    assert parts[0]["window"] == 0.0 and parts[-1]["window"] == 1.0
+
+    shot = SimpleNamespace(source="shot", duration_s=20.0)
+    assert len(edit._split_static({"asset": shot, "start": 0.0, "end": 19.0}, beats)) == 1
+    assert edit._nearest([0.0, 2.0, 4.0], 2.7, 0.5) is None and edit._nearest([0.0, 2.0, 4.0], 2.4, 0.5) == 2.0
+
+
+def test_clip_score_calibration_and_comparability(monkeypatch):
+    """向量：不同编码器的向量不比较；匹配分按实测区间标定。"""
+    from app.adapters import clip as C
+
+    monkeypatch.setattr(type(C.encoder), "is_real", property(lambda s: True))
+    monkeypatch.setattr(type(C.encoder), "model_id", property(lambda s: "clip:x"))
+    assert C.match_score(0.47) > 0.9 and C.match_score(0.31) < 0.1 and 0.55 < C.match_score(0.41) < 0.65
+    assert C.comparable("clip:x") and not C.comparable("hash") and not C.comparable("")

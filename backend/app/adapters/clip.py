@@ -32,6 +32,18 @@ def _hash_vec(text: str, dim: int = DIM) -> list[float]:
     return [v / norm for v in vec]
 
 
+def _as_tensor(out, key: str):
+    """transformers 4.x 的 get_*_features 直接返回张量；5.x 返回输出对象（投影后的向量在
+    pooler_output / *_embeds 里）。两种都接。"""
+    if hasattr(out, "norm"):
+        return out
+    for k in (key, "pooler_output"):
+        v = getattr(out, k, None)
+        if v is not None:
+            return v
+    raise RuntimeError(f"无法从 {type(out).__name__} 取出特征向量")
+
+
 class _ClipEncoder:
     """惰性加载真 Chinese-CLIP；失败则永久退化为哈希编码。"""
 
@@ -44,7 +56,13 @@ class _ClipEncoder:
         if self._tried:
             return
         self._tried = True
+        if settings().force_mock:
+            self._ok = False      # 演示/测试模式不加载大模型
+            return
         try:
+            import os
+
+            os.environ.setdefault("HF_ENDPOINT", settings().hf_endpoint)
             import torch  # noqa: F401
             from transformers import ChineseCLIPModel, ChineseCLIPProcessor
 
@@ -60,6 +78,32 @@ class _ClipEncoder:
         self._load()
         return self._ok
 
+    @property
+    def model_id(self) -> str:
+        """向量出自哪个编码器。不同编码器的向量不可比（维度可能都是 512，但空间不同），
+        检索时只比较同一编码器产出的向量，换模型后由重建任务统一重算。"""
+        # 末尾版本号：向量的组成方式变了（如去掉文本混合）就加 1，旧向量会被自动重建
+        return f"clip:{settings().clip_model}:img-v2" if self.is_real else "hash"
+
+    def encode_asset(self, image_paths: list[str | Path], text: str) -> list[float]:
+        """素材向量 = 关键帧图像向量的均值（不混文本）。
+
+        试过「图像 0.7 + 标签文本 0.3」：文本-文本相似度远高于图文相似度（0.8 vs 0.4），
+        混进去后所有查询的匹配分都顶到 1.0，失去区分度（2026-10-05 实测）。
+        标签仍参与筛选（F4-5），检索打分只看画面本身。没有真模型时退化为文本哈希。
+        """
+        self._load()
+        if not self._ok:
+            return _hash_vec(text)
+        imgs = [Path(x) for x in image_paths if x and Path(x).is_file()]
+        vecs = [self.encode_image(x) for x in imgs[:3]]
+        if not vecs:
+            return self.encode_text(text)
+        n = len(vecs[0])
+        img = [sum(v[i] for v in vecs) / len(vecs) for i in range(n)]
+        norm = math.sqrt(sum(x * x for x in img)) or 1.0
+        return [x / norm for x in img]
+
     def encode_text(self, text: str) -> list[float]:
         self._load()
         if not self._ok:
@@ -68,12 +112,12 @@ class _ClipEncoder:
 
         with torch.no_grad():
             inputs = self._proc(text=[text], return_tensors="pt", padding=True)
-            feat = self._model.get_text_features(**inputs)
+            feat = _as_tensor(self._model.get_text_features(**inputs), "text_embeds")
             feat = feat / feat.norm(dim=-1, keepdim=True)
             return feat[0].tolist()
 
     def encode_image(self, path: str | Path, extra_text: str = "") -> list[float]:
-        """无真模型时用「路径 + 标签」的哈希向量近似，保证同一素材稳定可检索。"""
+        """单张**图片**（不是视频：视频请先抽关键帧）。无真模型时用「路径 + 标签」哈希近似。"""
         self._load()
         if not self._ok:
             p = Path(path)
@@ -85,7 +129,7 @@ class _ClipEncoder:
 
         with torch.no_grad():
             inputs = self._proc(images=Image.open(path).convert("RGB"), return_tensors="pt")
-            feat = self._model.get_image_features(**inputs)
+            feat = _as_tensor(self._model.get_image_features(**inputs), "image_embeds")
             feat = feat / feat.norm(dim=-1, keepdim=True)
             return feat[0].tolist()
 
@@ -103,9 +147,35 @@ def cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb)
 
 
-def rank(query: str, items: list[tuple[str, list[float]]], top_k: int = 10) -> list[tuple[str, float]]:
-    """items: [(id, embedding)] -> [(id, score)] 降序。"""
+# Chinese-CLIP（vit-base-patch16）图文余弦的实测区间（长白山 8 张分镜 × 6 条查询，2026-10-05）：
+#   画面相符 0.43–0.48；同目的地但不对题 0.33–0.39；完全无关（海边/地铁站）0.29–0.33。
+# 原始余弦给运营看没有区分度，按 [0.30, 0.48] 线性映射到 0–1：
+# PRD F6-2「匹配分 ≥ 0.6 才算合格」落在原始余弦 ≈0.41，正好卡在「相符」与「不对题」之间。
+_COS_LO, _COS_HI = 0.30, 0.48
+
+
+def match_score(cos: float) -> float:
+    if not encoder.is_real:
+        return round(max(0.0, min(1.0, cos)), 4)
+    return round(max(0.0, min(1.0, (cos - _COS_LO) / (_COS_HI - _COS_LO))), 4)
+
+
+def comparable(emb_model: str | None) -> bool:
+    """这条向量能不能和当前查询向量比较（必须同一编码器）。"""
+    return (emb_model or "hash") == encoder.model_id
+
+
+def rank(query: str, items: list[tuple], top_k: int = 10) -> list[tuple[str, float]]:
+    """items: [(id, embedding)] 或 [(id, embedding, embedding_model)] -> [(id, 匹配分)] 降序。
+
+    编码器不一致的向量（如换成真模型前存的哈希向量）不参与排序，等重建任务重算。
+    """
     qv = encoder.encode_text(query)
-    scored = [(i, cosine(qv, v)) for i, v in items]
+    scored = []
+    for it in items:
+        i, v = it[0], it[1]
+        if len(it) > 2 and not comparable(it[2]):
+            continue
+        scored.append((i, match_score(cosine(qv, v))))
     scored.sort(key=lambda x: x[1], reverse=True)
     return scored[:top_k]

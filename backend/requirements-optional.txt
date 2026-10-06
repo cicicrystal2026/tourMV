@@ -1,14 +1,17 @@
 # 可选依赖 —— 装上后自动启用真模型，不装则走本地兜底实现
 #
-# 音频分析（节拍检测、BPM）
+# 音频分析（节拍检测、BPM）。没有它节拍是按 BPM 估的网格，切点不做吸附
+# 已验证：librosa 1.0 + numba 0.68（Python 3.14）
 librosa>=0.10
 numpy>=1.26
 soundfile>=0.12
-# 视觉向量检索（Chinese-CLIP）
-# 需与本机 CUDA 版本匹配，建议先装 torch 再装 transformers
-# torch>=2.2
-# transformers>=4.40
-# pillow>=10.0
+# 视觉向量检索（Chinese-CLIP，PRD F4-3：不得用哈希占位编码）
+# CPU 版：pip install torch --index-url https://download.pytorch.org/whl/cpu
+# 有 CUDA 的机器装对应 CUDA 版本的 torch。首次运行从 HF_ENDPOINT 下载约 750MB 权重。
+# 已验证：Python 3.14 + torch 2.14.1+cpu + transformers 5.18
+torch>=2.2
+transformers>=4.40
+pillow>=10.0
 # faiss-cpu>=1.8
 # 歌词逐句对齐（任选其一，并设置 ALIGN_ENGINE）
 # whisperx>=3.3

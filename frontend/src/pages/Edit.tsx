@@ -319,6 +319,34 @@ export default function EditPage() {
           </Banner>
         )}
         {msg && <Banner tone="ok" onClose={() => setMsg('')}>{msg}</Banner>}
+        {detail.analyze_error && (
+          // F3-1：对齐失败不静默降级，由人决定重试还是接受估算（估算的字幕可能与歌声不同步）
+          <Banner tone="error">
+            <div className="flex flex-col gap-2">
+              <div>
+                <span className="font-medium">歌词与歌声对齐失败，项目暂停在「音频分析」。</span>
+                {String(detail.analyze_error).replace(/^AlignError:\s*/, '')}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  className="btn btn-sm"
+                  disabled={!!busy}
+                  onClick={() => act('retry-align', () => api.retryAnalyze(p.id, false), () => { setMsg('已重新对齐（约 1–2 分钟）'); load(p.id) })}
+                >
+                  重试对齐
+                </button>
+                <button
+                  className="btn btn-sm"
+                  disabled={!!busy}
+                  title="不跟歌声对齐，按每句字数平均分配时间。字幕可能明显早于或晚于演唱，只建议内部预览用"
+                  onClick={() => act('estimate', () => api.retryAnalyze(p.id, true), () => { setMsg('已按字数估算时间轴'); load(p.id) })}
+                >
+                  按字数估算继续（字幕可能不同步）
+                </button>
+              </div>
+            </div>
+          </Banner>
+        )}
         {!tl && (
           <Banner tone="warn">
             还没有时间线。{p.status === 'edit_review' ? '' : '需要先选定曲目并完成音频分析。'}

@@ -274,12 +274,32 @@ def _maybe_finish_round(ctx: JobContext) -> None:
     _advance_if(db, cand.project_id, "music_generating", "music_review")
 
 
+# ------------------------------------------------------------------ 素材向量重建
+@handler("reembed_assets")
+def h_reembed_assets(ctx: JobContext) -> None:
+    from ..services import assets as assets_svc
+
+    def prog(n: int, total: int) -> None:
+        ctx.progress(int(100 * n / max(1, total)), f"重建素材向量 {n}/{total}")
+
+    ctx.set_result(assets_svc.reembed_stale(ctx.db, on_progress=prog))
+
+
 # ------------------------------------------------------------------ 剪辑
 @handler("audio_analyze")
 def h_audio_analyze(ctx: JobContext) -> None:
     pid = ctx.job().project_id
     ctx.progress(15, "节拍与强拍检测")
-    tl = edit_svc.analyze(ctx.db, pid)
+    from ..adapters.align import AlignError
+
+    try:
+        tl = edit_svc.analyze(ctx.db, pid, allow_estimate=bool((ctx.job().payload or {}).get("allow_estimate")))
+    except AlignError as e:
+        p = ctx.db.get(Project, pid)
+        if p is not None and p.status == "audio_analyzing":
+            p.status_note = f"对齐失败，等待处理：{e}"[:300]
+            ctx.db.commit()
+        raise
     ctx.progress(70, "歌词逐句对齐")
     ctx.set_result({"bpm": tl.bpm, "lines": len(tl.lyric_lines or []), "duration_s": tl.duration_s})
     if _advance_if(ctx.db, pid, "audio_analyzing", "rough_cutting"):

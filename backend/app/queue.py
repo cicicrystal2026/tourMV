@@ -145,7 +145,7 @@ def _run_one(job_id: str, job_type: str) -> None:
             j = ctx.job()
             j.error = f"{type(e).__name__}: {e}"[:2000]
             j.retries += 1
-            if j.retries < MAX_RETRIES:
+            if j.retries < MAX_RETRIES and not getattr(e, "no_retry", False):
                 j.status = "queued"  # 指数退避由轮询间隔自然实现
                 j.progress = 0
             else:

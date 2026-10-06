@@ -5,7 +5,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..adapters import align, clip as clip_ad, llm, media
-from ..adapters.clip import cosine, encoder
+from ..adapters.clip import comparable, cosine, encoder, match_score
+
+
+def _sim(qv: list[float], a: Asset) -> float:
+    """查询与素材的匹配分（0–1）；编码器不一致（待重建）的素材记 0，不参与排序前列。"""
+    if not a.embedding or not comparable(a.embedding_model):
+        return 0.0
+    return match_score(cosine(qv, a.embedding))
 from ..models import Asset, Project, Timeline, TimelineClip
 from ..serialize import basename
 from ..services.projects import ProjectError, get as get_project
@@ -17,10 +24,13 @@ SCENE_BATCH = 12
 # 超了就从「首句人声前 INTRO_LEAD_S 秒」处起播，留一点进入感，并做淡入。
 MAX_INTRO_S = 3.0
 INTRO_LEAD_S = 1.5
+# PRD V1.1 F3-2：单个静态 AI 镜头连续时长上限；切点吸附到最近强拍的最大挪动距离
+MAX_STATIC_S = 8.0
+SNAP_WINDOW_S = 0.5
 
 
 # ------------------------------------------------------------------ 音频分析
-def analyze(db: Session, project_id: str) -> Timeline:
+def analyze(db: Session, project_id: str, allow_estimate: bool = False) -> Timeline:
     p = get_project(db, project_id)
     w = winner_of(db, p.id)
     if w is None:
@@ -28,7 +38,11 @@ def analyze(db: Session, project_id: str) -> Timeline:
     if not w.audio_path:
         raise ProjectError("选定曲目没有音频文件")
 
-    beats = align.detect_beats(w.audio_path, fallback_bpm=w.bpm or 84.0)
+    from .projects import brief_of
+
+    b = brief_of(db, p.id)
+    hint = ((b.bpm_min + b.bpm_max) / 2) if b and b.bpm_min and b.bpm_max else (w.bpm or 84.0)
+    beats = align.detect_beats(w.audio_path, fallback_bpm=hint)
     from .lyrics import latest
 
     ver = latest(db, p.id)
@@ -37,7 +51,8 @@ def analyze(db: Session, project_id: str) -> Timeline:
     lines = [ln for _n, ln in flat]
     duration = float(w.duration_s or 0) or media.probe(w.audio_path).get("duration_s") or 180.0
     aligned = align.align_lyrics(w.audio_path, lines, duration,
-                                 strong_beats=beats.get("strong_beats"), bpm=beats.get("bpm", 84.0))
+                                 strong_beats=beats.get("strong_beats"), bpm=beats.get("bpm", 84.0),
+                                 allow_estimate=allow_estimate)
     # 回填段落名：短版切片需要定位副歌
     for i, item in enumerate(aligned.get("lines", [])):
         if i < len(flat):
@@ -197,7 +212,6 @@ def auto_cut(db: Session, project_id: str, keep_manual: bool = True) -> Timeline
     used: set[str] = {c.asset_id for c in old.values() if c.locked and c.asset_id and keep_manual}
     counts: dict[str, int] = {}
     last_id: str | None = None
-    strong = tl.beats[::4] if tl.beats else []
     order = 0
     # 先收集，再统一「收口」——因为歌词逐句对齐后句子之间会留空隙
     # （间奏、拖腔），如果每段只按句子时长排，镜头之间就有黑洞：
@@ -208,13 +222,11 @@ def auto_cut(db: Session, project_id: str, keep_manual: bool = True) -> Timeline
         if end - start < 0.4:  # 过短的行与前一句合并
             continue
         if keep_manual and i in old and old[i].locked:
-            old[i].order = order
-            order += 1
+            # 人工锁定的片段原样保留，但要进入排序与收口（否则自动片段会盖住它）
+            staged.append({"locked": old[i], "start": float(old[i].start_s), "end": float(old[i].end_s)})
             continue
-        # ⚠️ 这里**刻意不做节拍吸附**。歌词时间轴现在来自强制对齐（歌声本身），
-        # 是比节拍网格更可信的信息源；而 librosa 缺席时 tl.beats 是「84BPM 假网格」，
-        # 拿它吸附等于把已经对齐好的时间再随机挪 ±0.4s —— 纯有害。见 align.py 顶部说明。
-        _ = strong  # 保留变量以便将来接真实节拍（目前不参与计算）
+        # 镜头切点的节拍吸附放在收口之后统一做（见下方 _strong_beats），
+        # 这里先按歌词时间（来自歌声）排。
         # 分镜里审过的行直接对号入座；其余行才走「LLM 分配 + 相邻轮换」
         pinned = by_index.get(i + 1) or by_text.get((line["text"] or "").strip())
         pinned_asset = db.get(Asset, pinned) if pinned else None
@@ -224,9 +236,8 @@ def auto_cut(db: Session, project_id: str, keep_manual: bool = True) -> Timeline
         used.add(asset.id)
         counts[asset.id] = counts.get(asset.id, 0) + 1
         last_id = asset.id
-        staged.append({"order": order, "asset": asset, "start": start, "end": end,
+        staged.append({"asset": asset, "start": start, "end": end,
                        "line": line["text"], "desc": desc})
-        order += 1
 
     # 收口：每个镜头延伸到下一个镜头的起点，最后一个铺到音频末尾，保证无缝
     total = float(tl.duration_s or 0)
@@ -237,23 +248,83 @@ def auto_cut(db: Session, project_id: str, keep_manual: bool = True) -> Timeline
     # 第一句歌词之前通常有几秒前奏。这段也得有画面 —— 否则整条画面轨
     # 会比音频提前「前奏时长」秒，末句画面还没出来音乐就结束了。
     # 让第一个镜头从 0 开始铺（前奏就看着第一句的画面，MV 里很正常）。
-    if staged:
+    if staged and not staged[0].get("locked"):
         staged[0]["start"] = 0.0
 
+    # 切点吸附到最近强拍（F3-2）。只在节拍来自真实检测（librosa）时做 ——
+    # 解析式网格是按 BPM 猜的，吸附上去等于随机挪动。字幕走歌词时间轴，不受影响。
+    strong_beats = _strong_beats(tl)
+    if strong_beats:
+        for k in range(1, len(staged)):
+            a_, b_ = staged[k - 1], staged[k]
+            if a_.get("locked") or b_.get("locked"):
+                continue
+            t = _nearest(strong_beats, b_["start"], SNAP_WINDOW_S)
+            if t is not None and a_["start"] + 0.6 < t < b_["end"] - 0.6:
+                a_["end"] = b_["start"] = t
+
+    order = 0
     for it in staged:
-        seg = max(0.6, it["end"] - it["start"])
-        src_len = float(it["asset"].duration_s or 0) or seg
-        # 需要的时间超过素材本身时，in_s 归零（整段都用上，渲染阶段再放慢补齐）
-        in_s = 0.0 if src_len <= seg else round(min(src_len - seg, max(0.0, (src_len - seg) / 2)), 2)
-        db.add(TimelineClip(
-            timeline_id=tl.id, project_id=p.id, order=it["order"], asset_id=it["asset"].id,
-            in_s=in_s, out_s=round(min(src_len, in_s + seg), 2),
-            start_s=round(it["start"], 2), end_s=round(it["end"], 2),
-            lyric_line=it["line"], scene_prompt=it["desc"], locked=False, manual=False,
-        ))
+        if it.get("locked"):
+            it["locked"].order = order
+            order += 1
+            continue
+        for part in _split_static(it, strong_beats):
+            seg = max(0.6, part["end"] - part["start"])
+            src_len = float(it["asset"].duration_s or 0) or seg
+            if part.get("window") is not None:
+                # 拆分出来的段落：依次取素材的不同时间窗（推镜头素材里就是由远到近的不同景别）
+                in_s = round(max(0.0, min(src_len - seg, part["window"] * max(0.0, src_len - seg))), 2)
+            else:
+                # 需要的时间超过素材本身时，in_s 归零（整段都用上，渲染阶段再放慢补齐）
+                in_s = 0.0 if src_len <= seg else round(min(src_len - seg, max(0.0, (src_len - seg) / 2)), 2)
+            db.add(TimelineClip(
+                timeline_id=tl.id, project_id=p.id, order=order, asset_id=it["asset"].id,
+                in_s=in_s, out_s=round(min(src_len, in_s + seg), 2),
+                start_s=round(part["start"], 2), end_s=round(part["end"], 2),
+                lyric_line=it["line"], scene_prompt=it["desc"], locked=False, manual=False,
+            ))
+            order += 1
     tl.auto_version += 1
     db.commit()
     return tl
+
+
+def _strong_beats(tl: Timeline) -> list[float]:
+    """真实检测出的强拍（每 4 拍取 1，近似小节首拍）；节拍是估算网格时返回空。"""
+    if (tl.align_meta or {}).get("beat_engine") != "librosa" or not tl.beats:
+        return []
+    return [float(b) for b in tl.beats[::4]]
+
+
+def _nearest(points: list[float], t: float, window: float) -> float | None:
+    best = min(points, key=lambda b: abs(b - t)) if points else None
+    return round(best, 3) if best is not None and abs(best - t) <= window else None
+
+
+def _split_static(it: dict, strong_beats: list[float]) -> list[dict]:
+    """AI 生成的静态画面单段超过 MAX_STATIC_S 时拆成几段（F3-2）。
+
+    每段取同一条推镜头素材的不同时间窗（第 1 段取开头的远景、最后一段取结尾的近景），
+    剪出来是「同一景点、景别递进」的跳切，而不是 12 秒盯着一张图慢慢放大。
+    实拍素材本身有运动，不拆。拆分点同样尽量落在强拍上。
+    """
+    a: Asset = it["asset"]
+    start, end = float(it["start"]), float(it["end"])
+    dur = end - start
+    if a.source != "ai" or dur <= MAX_STATIC_S:
+        return [{"start": start, "end": end}]
+    import math
+
+    n = math.ceil(dur / MAX_STATIC_S)
+    cuts = [start + dur * k / n for k in range(1, n)]
+    snapped = []
+    for c in cuts:
+        t = _nearest(strong_beats, c, SNAP_WINDOW_S) if strong_beats else None
+        snapped.append(t if t is not None else round(c, 3))
+    bounds = [start, *snapped, end]
+    return [{"start": bounds[k], "end": bounds[k + 1], "window": (k / (n - 1)) if n > 1 else 0.0}
+            for k in range(n)]
 
 
 def _real_pool(assets: list[Asset], destination: str = "") -> list[Asset]:
@@ -355,7 +426,7 @@ def _rotate_asset(desc: str, assets: list[Asset], counts: dict[str, int],
     if not pool:
         return assets[0] if assets else None
     qv = encoder.encode_text(desc)
-    return min(pool, key=lambda a: (counts.get(a.id, 0), -cosine(qv, a.embedding or [])))
+    return min(pool, key=lambda a: (counts.get(a.id, 0), -_sim(qv, a)))
 
 
 def _best_asset(desc: str, assets: list[Asset], used: set[str]) -> Asset | None:
@@ -363,9 +434,7 @@ def _best_asset(desc: str, assets: list[Asset], used: set[str]) -> Asset | None:
     qv = encoder.encode_text(desc)
     scored: list[tuple[Asset, float]] = []
     for a in assets:
-        emb = a.embedding or []
-        s = cosine(qv, emb) if emb else 0.0
-        scored.append((a, s))
+        scored.append((a, _sim(qv, a)))
     scored.sort(key=lambda x: x[1], reverse=True)
     for a, _s in scored:
         if a.id not in used:
@@ -380,8 +449,7 @@ def clip_candidates(db: Session, clip_id: str, top_k: int = 4) -> list[dict]:
         raise ProjectError("片段不存在")
     assets = _usable_assets(db)
     qv = encoder.encode_text(c.scene_prompt or c.lyric_line or "")
-    scored = sorted(((a, cosine(qv, a.embedding or [])) for a in assets),
-                    key=lambda x: x[1], reverse=True)
+    scored = sorted(((a, _sim(qv, a)) for a in assets), key=lambda x: x[1], reverse=True)
     out = []
     for a, s in scored[:top_k]:
         out.append({

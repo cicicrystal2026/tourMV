@@ -37,7 +37,11 @@ def detect_beats(audio_path: str, fallback_bpm: float = 84.0) -> dict:
         import numpy as np  # type: ignore
 
         y, sr = librosa.load(audio_path, sr=22050, mono=True)
-        tempo, frames = librosa.beat.beat_track(y=y, sr=sr)
+        # 用简报/曲目给出的速度作先验：节拍跟踪天然有「半速/倍速」歧义
+        # （实测同一首歌不给先验得 136，给 84 先验得 70），先验让结果落在简报区间附近
+        oenv = librosa.onset.onset_strength(y=y, sr=sr)
+        tempo, frames = librosa.beat.beat_track(onset_envelope=oenv, sr=sr,
+                                                start_bpm=float(fallback_bpm or 120.0))
         bpm = float(np.atleast_1d(tempo)[0])
         beats = [float(t) for t in librosa.frames_to_time(frames, sr=sr)]
         if len(beats) < 4:
@@ -254,10 +258,23 @@ def model_note() -> str:
 
 
 # ---------------------------------------------------------------- 歌词对齐
+class AlignError(RuntimeError):
+    """强制对齐失败。PRD V1.1 F3-1：对齐模型未就绪 / 识别不可信时任务失败并提示，不得静默降级。
+
+    no_retry：重试大概率同样失败（模型缺失、识别率低），自动重试 3 次只是白跑几分钟 CPU。
+    """
+    no_retry = True
+
+
 def align_lyrics(audio_path: str, lines: list[str], duration_s: float,
                  strong_beats: list[float] | None = None, bpm: float = 84.0,
-                 section_of: list[str] | None = None) -> dict:
-    """返回 {lines: [{text, start_s, end_s}], engine, note}。"""
+                 section_of: list[str] | None = None, allow_estimate: bool = False) -> dict:
+    """返回 {lines: [{text, start_s, end_s}], engine, note}。
+
+    allow_estimate=False（默认）时对齐失败抛 AlignError；只有人明确选择
+    「按字数估算继续」或配置 ALIGN_ENGINE=analytic 时才用估算。
+    V1.0 的静默回退让长白山样片字幕整体早了 25 秒，页面上却只有一个小标签。
+    """
     lines = [ln for ln in (lines or []) if ln and ln.strip()]
     if not lines:
         return {"lines": [], "engine": "analytic", "note": "没有歌词"}
@@ -270,8 +287,11 @@ def align_lyrics(audio_path: str, lines: list[str], duration_s: float,
             out = _whisper_align(audio_path, lines, duration_s)
             return out
         except Exception as e:  # noqa: BLE001
+            reason = f"{type(e).__name__}: {str(e)[:160]}"
+            if not allow_estimate:
+                raise AlignError(f"歌词与歌声对齐失败（{reason}）") from e
             fallback = _analytic_align(lines, duration_s, strong_beats, bpm, snap=False)
-            fallback["note"] = f"强制对齐不可用（{type(e).__name__}: {str(e)[:120]}），已回退估算"
+            fallback["note"] = f"人工选择按字数估算（对齐失败：{reason}），字幕可能与歌声不同步"
             return fallback
 
     out = _analytic_align(lines, duration_s, strong_beats, bpm, snap=False)

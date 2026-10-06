@@ -81,6 +81,22 @@ def realign(project_id: str, db: Session = Depends(get_db)) -> dict:
     return {"job_id": j1.id, "cut_job_id": j2.id}
 
 
+@router.post("/projects/{project_id}/timeline/analyze")
+def retry_analyze(project_id: str, estimate: bool = False, db: Session = Depends(get_db)) -> dict:
+    """对齐失败后的两个出口：重试强制对齐，或由人明确选择「按字数估算继续」（F3-1）。"""
+    p = db.get(Project, project_id)
+    if p is None:
+        _fail(ProjectError("项目不存在"))
+    if p.status != "audio_analyzing":
+        _fail(ProjectError("项目不在「音频分析」阶段；已有时间线时请用「重做歌词对齐」"))
+    p.status_note = "按字数估算歌词时间轴（人工选择）" if estimate else "重试歌词对齐"
+    j = enqueue(db, "audio_analyze", queue="gpu", project_id=project_id, ref_id=project_id,
+                name="按字数估算歌词时间轴" if estimate else "重试歌词强制对齐",
+                payload={"allow_estimate": bool(estimate)})
+    db.commit()
+    return {"job_id": j.id}
+
+
 @router.get("/projects/{project_id}/timeline/clips/{clip_id}/candidates")
 def clip_candidates(project_id: str, clip_id: str, top: int = 4,
                     db: Session = Depends(get_db)) -> dict:
