@@ -42,18 +42,42 @@ export default function Dashboard() {
     }
   }, [])
 
-  // setTimeout 链：上一轮没回来不发下一轮（V1.0 用 setInterval，后端慢时请求层层堆积）
+  // 实时更新（PRD V1.1 F1-2：状态变化 5 秒内反映到看板）：
+  // 优先用 SSE —— 后端每秒比对变更，变了才推，看板收到后再拉一次汇总；
+  // SSE 不可用（被代理缓冲、断线）时退回轮询。轮询用 setTimeout 链，上一轮没回来不发下一轮。
   useEffect(() => {
     let alive = true
     let t: number | undefined
+    let sseOk = false
+    let pending = false
+    const refresh = async () => {
+      if (pending) return
+      pending = true
+      try {
+        await load()
+      } finally {
+        pending = false
+      }
+    }
     const tick = async () => {
-      await load()
-      if (alive) t = window.setTimeout(tick, 6000)
+      await refresh()
+      // 推送正常时轮询只做兜底（30 秒一次）；推送不可用时 4 秒一次，满足 5 秒内可见
+      if (alive) t = window.setTimeout(tick, sseOk ? 30000 : 4000)
+    }
+    let es: EventSource | null = null
+    try {
+      es = new EventSource('/api/events', { withCredentials: true })
+      es.addEventListener('ready', () => { sseOk = true })
+      es.addEventListener('change', () => { refresh() })
+      es.onerror = () => { sseOk = false }
+    } catch {
+      es = null
     }
     tick()
     return () => {
       alive = false
       if (t) clearTimeout(t)
+      es?.close()
     }
   }, [load])
 

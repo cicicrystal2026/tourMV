@@ -794,13 +794,16 @@ def test_static_ai_shot_split_and_beat_snap():
 
     ai = SimpleNamespace(source="ai", duration_s=20.0)
     beats = [i * 1.0 for i in range(20)]           # 每 1 秒一个强拍（拆分点离强拍都 ≤ 0.5 秒）
-    parts = edit._split_static({"asset": ai, "start": 0.0, "end": 19.0}, beats)
+    parts = edit._split_static({"asset": ai, "start": 0.0, "end": 19.0}, (beats, beats))
     assert len(parts) == 3 and all(p["end"] - p["start"] <= 8.0 + 0.5 for p in parts)
     assert all(p["start"] in beats for p in parts[1:])        # 拆分点落在强拍上
     assert parts[0]["window"] == 0.0 and parts[-1]["window"] == 1.0
 
     shot = SimpleNamespace(source="shot", duration_s=20.0)
-    assert len(edit._split_static({"asset": shot, "start": 0.0, "end": 19.0}, beats)) == 1
+    assert len(edit._split_static({"asset": shot, "start": 0.0, "end": 19.0}, (beats, beats))) == 1
+    # 强拍太远时退到普通拍
+    assert edit._snap(([0.0, 4.0], [0.0, 1.0, 2.0, 3.0, 4.0]), 2.2) == 2.0
+    assert edit._snap(([0.0, 4.0], [0.0, 1.0, 2.0, 3.0, 4.0]), 3.7) == 4.0
     assert edit._nearest([0.0, 2.0, 4.0], 2.7, 0.5) is None and edit._nearest([0.0, 2.0, 4.0], 2.4, 0.5) == 2.0
 
 
@@ -847,4 +850,26 @@ def test_revision_carries_keep_decisions(client, has_real_db):
         for t in (LyricCheck, LyricVersion):
             db.query(t).filter(t.project_id.in_([src.id, rev.id])).delete()
         db.query(Project).filter(Project.id.in_([src.id, rev.id])).delete()
+        db.commit()
+
+
+def test_event_fingerprint_changes_on_state_change(client):
+    """F1-2 SSE：项目状态一变，变更指纹就变（看板据此 1 秒内刷新）。"""
+    import time
+
+    from app.api.events import fingerprint
+    from app.db import SessionLocal
+    from app.models import Project
+
+    before = fingerprint()
+    time.sleep(0.01)
+    with SessionLocal() as db:
+        p = Project(name="测试·推送", destination="x", status="briefing")
+        db.add(p)
+        db.commit()
+        pid = p.id
+    after = fingerprint()
+    assert after != before
+    with SessionLocal() as db:
+        db.query(Project).filter(Project.id == pid).delete()
         db.commit()

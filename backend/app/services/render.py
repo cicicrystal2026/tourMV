@@ -458,7 +458,9 @@ def render_variant(db: Session, project_id: str, variant: str, progress=None) ->
         # CRF 26 是发布档：实测 1080p25 的缓动镜头约 1.1 Mbps，
         # 与 CRF 22（1.8 Mbps）肉眼无差，但体积小 40% ——
         # 一条 3 分钟的片子 5 个版本，差额是 80MB 级，直接决定能不能发布出去。
-        cmd += ["-c:v", "libx264", "-preset", "ultrafast" if fast else "veryfast",
+        # 预览的成片编码仍用 veryfast：ultrafast 实测 2:43 的 720p 有 74MB，发给同事评审太大；
+        # 提速主要靠中间片段 ultrafast + 720p，成片编码这一步只占小头
+        cmd += ["-c:v", "libx264", "-preset", "veryfast",
                 "-crf", "30" if fast else "26", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
         cmd += ["-t", f"{span:.3f}"] if cfg.get("short") else ["-shortest"]
         cmd += [str(out)]
