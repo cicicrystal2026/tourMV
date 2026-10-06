@@ -281,6 +281,19 @@ def _maybe_finish_round(ctx: JobContext) -> None:
     _advance_if(db, cand.project_id, "music_generating", "music_review")
 
 
+@handler("render_preview")
+def h_render_preview(ctx: JobContext) -> None:
+    """F3-7 720p 内部评审预览：不改项目状态，不算交付。"""
+    import time as _t
+
+    t0 = _t.time()
+    job = render_svc.render_variant(ctx.db, ctx.job().project_id, render_svc.PREVIEW_VARIANT,
+                                    progress=lambda v: ctx.progress(v, "导出 720p 预览"))
+    if job.status != "done":
+        raise RuntimeError(job.error or "预览导出失败")
+    ctx.set_result({"elapsed_s": round(_t.time() - t0, 1), "size_mb": job.size_mb})
+
+
 # ------------------------------------------------------------------ 素材向量重建
 @handler("reembed_assets")
 def h_reembed_assets(ctx: JobContext) -> None:

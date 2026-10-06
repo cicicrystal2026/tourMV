@@ -137,9 +137,43 @@ def render(project_id: str, payload: dict = Body(default={}), db: Session = Depe
     return {"mode": "job", "job_id": j.id}
 
 
+@router.get("/projects/{project_id}/preview")
+def get_preview(project_id: str, db: Session = Depends(get_db)) -> dict:
+    """F3-7 内部评审预览（720p）：最近一次导出结果 + 是否在导出中。"""
+    from ..models import Job
+
+    r = db.execute(select(RenderJob).where(RenderJob.project_id == project_id,
+                                           RenderJob.variant == rsvc.PREVIEW_VARIANT)).scalar_one_or_none()
+    j = db.execute(select(Job).where(Job.project_id == project_id, Job.type == "render_preview")
+                   .order_by(Job.created_at.desc()).limit(1)).scalar_one_or_none()
+    return {"render": S.render_job(r) if r else None,
+            "job": {"status": j.status, "progress": j.progress, "error": j.error,
+                    "result": j.result or {}} if j else None}
+
+
+@router.post("/projects/{project_id}/preview")
+def make_preview(project_id: str, db: Session = Depends(get_db)) -> dict:
+    from ..models import Job, Timeline
+
+    p = db.get(Project, project_id)
+    if p is None:
+        _fail(ProjectError("项目不存在"))
+    if db.execute(select(Timeline).where(Timeline.project_id == project_id)).scalar_one_or_none() is None:
+        _fail(ProjectError("还没有时间线，先完成粗剪"))
+    busy = db.execute(select(Job).where(Job.project_id == project_id, Job.type == "render_preview",
+                                        Job.status.in_(("queued", "running")))).scalars().first()
+    if busy is not None:
+        return {"job_id": busy.id, "duplicate": True}
+    j = enqueue(db, "render_preview", queue="gpu", project_id=project_id, ref_id=project_id,
+                name="导出 720p 预览")
+    db.commit()
+    return {"job_id": j.id}
+
+
 @router.get("/projects/{project_id}/renders")
 def renders(project_id: str, db: Session = Depends(get_db)) -> list[dict]:
-    rows = db.execute(select(RenderJob).where(RenderJob.project_id == project_id)).scalars().all()
+    rows = db.execute(select(RenderJob).where(RenderJob.project_id == project_id,
+                                              RenderJob.variant != rsvc.PREVIEW_VARIANT)).scalars().all()
     order = list(rsvc.VARIANTS)
     rows = sorted(rows, key=lambda r: order.index(r.variant) if r.variant in order else 99)
     return [S.render_job(r) for r in rows]

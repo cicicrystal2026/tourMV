@@ -20,6 +20,8 @@ export default function EditPage() {
   const [selected, setSelected] = useState<string>('')
   const [cands, setCands] = useState<any[]>([])
   const [renders, setRenders] = useState<any[]>([])
+  // F3-7 内部评审预览（720p，不算交付）
+  const [preview, setPreview] = useState<any>(null)
   // 默认全选「带字幕」的版本 —— 文旅 MV 主交付物必须有歌词。
   // （无字幕的 clean 版留给二剪，默认不勾。）
   const [variants, setVariants] = useState<string[]>(
@@ -57,9 +59,11 @@ export default function EditPage() {
   // unhandled rejection，页面上什么都不提示（旧链接失效时就是这个表现）。
   const load = useCallback(async (id: string) => {
     try {
-      const [d, t, r, v] = await Promise.all([
+      const [d, t, r, v, pv] = await Promise.all([
         api.project(id), api.timeline(id), api.renders(id), api.renderVariants(),
+        api.preview(id).catch(() => null),
       ])
+      setPreview(pv)
       setDetail(d)
       setTl(t.timeline)
       setClips(t.clips || [])
@@ -82,9 +86,10 @@ export default function EditPage() {
 
   // 生成/合成中轮询
   const status = detail?.project?.status
+  const previewRunning = ['queued', 'running'].includes(preview?.job?.status)
   useEffect(() => {
     if (!projectId) return
-    if (!['audio_analyzing', 'rough_cutting', 'rendering'].includes(status)) return
+    if (!['audio_analyzing', 'rough_cutting', 'rendering'].includes(status) && !previewRunning) return
     let alive = true
     let t: number | undefined
     const tick = async () => {
@@ -96,7 +101,7 @@ export default function EditPage() {
       alive = false
       if (t) clearTimeout(t)
     }
-  }, [projectId, status, load])
+  }, [projectId, status, previewRunning, load])
 
   const activeClip = useMemo(() => {
     return clips.find((c) => time >= c.start_s && time < c.end_s) || clips[Math.floor(clips.length * (time / Math.max(1, tl?.duration_s))) ]
@@ -214,6 +219,7 @@ export default function EditPage() {
   const p = detail.project
   const selectedClip = clips.find((c) => c.id === selected)
   const rendering = renders.some((r) => r.status === 'running' || r.status === 'queued')
+  const previewBusy = previewRunning
 
   return (
     <>
@@ -476,6 +482,41 @@ export default function EditPage() {
                 </div>
               )}
             </Section>
+
+            {tl && (
+              <Section
+                title="内部评审预览"
+                right={
+                  <button
+                    className="btn btn-sm"
+                    disabled={!!busy || p.locked || previewBusy}
+                    title="720p 低清、快速导出，用于内部评审；不是交付成片，不做出片自检"
+                    onClick={() => act('preview', () => api.makePreview(p.id), () => { setMsg('已开始导出 720p 预览'); load(p.id) })}
+                  >
+                    {previewBusy ? `导出中 ${preview?.job?.progress || 0}%` : preview?.render ? '重新导出 720p 预览' : '导出 720p 预览'}
+                  </button>
+                }
+                bodyClass="p-3"
+              >
+                {preview?.render?.status === 'done' && preview.render.url ? (
+                  <div className="flex flex-col gap-1.5">
+                    <video className="w-full max-w-[520px] rounded-btn bg-black" controls preload="metadata" src={preview.render.url} />
+                    <div className="text-[11px] text-ink-faint">
+                      720p · {preview.render.size_mb} MB
+                      {preview.job?.result?.elapsed_s ? ` · 导出用时 ${preview.job.result.elapsed_s} 秒` : ''}
+                      {' · '}{relative(preview.render.updated_at)}
+                      {' · 粗剪改动后需重新导出'}
+                    </div>
+                  </div>
+                ) : preview?.job?.status === 'failed' ? (
+                  <div className="text-[12px] text-human">导出失败：{preview.job.error}</div>
+                ) : (
+                  <div className="text-[12px] text-ink-faint">
+                    {previewBusy ? '正在导出（3 分钟的片约 1–2 分钟）…' : '精剪过程中可随时导出低清预览，发给同事评审；不影响项目状态。'}
+                  </div>
+                )}
+              </Section>
+            )}
 
             <Section
               title="成片"

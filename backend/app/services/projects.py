@@ -263,7 +263,8 @@ def detail(db: Session, project_id: str) -> dict:
         .order_by(LyricVersion.version.desc()).limit(1)
     ).scalar_one_or_none()
     tl = db.execute(select(Timeline).where(Timeline.project_id == p.id)).scalar_one_or_none()
-    renders = list(db.execute(select(RenderJob).where(RenderJob.project_id == p.id)).scalars())
+    renders = list(db.execute(select(RenderJob).where(RenderJob.project_id == p.id,
+                                                      RenderJob.variant != "preview")).scalars())
     cands = list(db.execute(select(MusicCandidate).where(MusicCandidate.project_id == p.id)).scalars())
     return {
         "project": p,

@@ -30,6 +30,11 @@ VARIANTS = {
     "clean": {"label": "横版 1920×1080 · 无字幕（供二次剪辑）", "w": 1920, "h": 1080, "subs": None},
 }
 
+# F3-7 内部评审预览：不是交付物，不进成片列表、不参与交付闸门；
+# 720p + ultrafast，3 分钟片要求 2 分钟内导出
+PREVIEW_VARIANT = "preview"
+PREVIEW_CFG = {"label": "720p 内部评审预览", "w": 1280, "h": 720, "subs": "zh", "preview": True}
+
 # 短版规格（PRD F3-8）：2:30–2:50
 SHORT_MIN_S, SHORT_MAX_S = 150.0, 170.0
 # 含 AI 画面的成片，片尾字卡（PRD V1.1 §7.3）
@@ -137,7 +142,7 @@ def _translate(lines: list[str], project_id: str) -> list[str]:
 
 # ------------------------------------------------------------------ 片段规整
 def _normalize(src: Path, dst: Path, in_s: float, out_s: float, w: int, h: int,
-               want_s: float | None = None) -> None:
+               want_s: float | None = None, fast: bool = False) -> None:
     """把源素材的一段归一化成目标尺寸的中间片段。
 
     ⚠️ 关键：**产物时长必须严格等于 want_s**（这一段在成片里该占多久），
@@ -169,7 +174,8 @@ def _normalize(src: Path, dst: Path, in_s: float, out_s: float, w: int, h: int,
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-ss", f"{max(0.0, in_s):.3f}", "-i", str(src),
         "-filter_complex", f"[0:v]{chain}[v]", "-map", "[v]",
-        "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-an", "-c:v", "libx264", "-preset", "ultrafast" if fast else "veryfast",
+        "-crf", "28" if fast else "20",
         "-pix_fmt", "yuv420p", "-fps_mode", "cfr",
         "-t", f"{dur:.3f}", str(dst),
     ], timeout=600)
@@ -354,9 +360,10 @@ def _ocr_clean(video: str, lines: list[dict], dur: float) -> tuple[bool, str]:
 
 
 def render_variant(db: Session, project_id: str, variant: str, progress=None) -> RenderJob:
-    cfg = VARIANTS.get(variant)
+    cfg = VARIANTS.get(variant) or (PREVIEW_CFG if variant == PREVIEW_VARIANT else None)
     if cfg is None:
         raise ProjectError(f"未知的成片版本：{variant}")
+    fast = bool(cfg.get("preview"))
     p = get_project(db, project_id)
     tl = db.execute(select(Timeline).where(Timeline.project_id == p.id)).scalar_one_or_none()
     if tl is None:
@@ -400,7 +407,7 @@ def render_variant(db: Session, project_id: str, variant: str, progress=None) ->
             if cfg.get("short") and cursor >= offset + span:
                 break
             seg_out = work / f"seg_{i:03d}.mp4"
-            _normalize(src, seg_out, in_s, out_s, cfg["w"], cfg["h"], want_s)
+            _normalize(src, seg_out, in_s, out_s, cfg["w"], cfg["h"], want_s, fast=fast)
             segs.append(seg_out)
             cursor += want_s
             if progress:
@@ -451,8 +458,8 @@ def render_variant(db: Session, project_id: str, variant: str, progress=None) ->
         # CRF 26 是发布档：实测 1080p25 的缓动镜头约 1.1 Mbps，
         # 与 CRF 22（1.8 Mbps）肉眼无差，但体积小 40% ——
         # 一条 3 分钟的片子 5 个版本，差额是 80MB 级，直接决定能不能发布出去。
-        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
-                "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+        cmd += ["-c:v", "libx264", "-preset", "ultrafast" if fast else "veryfast",
+                "-crf", "30" if fast else "26", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
         cmd += ["-t", f"{span:.3f}"] if cfg.get("short") else ["-shortest"]
         cmd += [str(out)]
         subprocess.run(cmd, capture_output=True, timeout=3600, check=True)
@@ -475,6 +482,14 @@ def render_variant(db: Session, project_id: str, variant: str, progress=None) ->
         job.size_mb = round(out.stat().st_size / 1024 / 1024, 2) if out.exists() else 0.0
         audio_s = float(media.probe(audio).get("duration_s") or 0) if has_audio else 0.0
         expect = span if cfg.get("short") else (min(span, audio_s) if audio_s else span)
+        if fast:
+            # 内部预览不做出片自检（不交付）；只记录导出用时，便于核对「3 分钟片 ≤ 2 分钟」
+            job.qc = {"ok": True, "checks": [], "preview": True}
+            job.status = "done"
+            job.progress = 100
+            db.commit()
+            db.refresh(job)
+            return job
         if progress:
             progress(96)    # 出片自检：抽帧核对字幕
         job.qc = quality_check(job, cfg, expect_s=expect, short=bool(cfg.get("short")),
@@ -497,11 +512,6 @@ def render_variant(db: Session, project_id: str, variant: str, progress=None) ->
 
     db.refresh(job)
     return job
-
-
-def preview_command(project_id: str) -> str:
-    """F3-7 导出预览：直接复用横版渲染（720p 低清可加 -vf scale=1280:-2）。"""
-    return f"POST /api/projects/{project_id}/render  variant=landscape_720p"
 
 
 def variant_list() -> list[dict]:
