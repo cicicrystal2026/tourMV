@@ -73,10 +73,17 @@ def h_lyric_check(ctx: JobContext) -> None:
     ctx.progress(30, "押韵 / 字数 / 史实检查")
     rows = lyrics_svc.run_checks(ctx.db, ver)
     p = ctx.db.get(Project, ver.project_id)
+    carried = 0
+    if p is not None and p.parent_project_id and ver.version == 1:
+        # 修订版：原项目对同一句同一类疑点已经写过保留理由的，直接沿用（理由前标明出处），
+        # 不让运营对没改过的歌词再逐条点一遍（E2E：修订 2 要重新处理 27 条）
+        src = lyrics_svc.latest(ctx.db, p.parent_project_id)
+        if src is not None:
+            carried = lyrics_svc._carry_decisions(ctx.db, src, ver, prefix="沿用原项目的决定：")
     if p is not None and p.status == "lyric_review":
         p.status_note = sm.spec("lyric_review").enter_note
         ctx.db.commit()
-    ctx.set_result({"lyric_version_id": ver.id, "issues": len(rows)})
+    ctx.set_result({"lyric_version_id": ver.id, "issues": len(rows), "carried": carried})
 
 
 # ------------------------------------------------------------------ 生曲

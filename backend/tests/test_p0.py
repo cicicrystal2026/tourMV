@@ -812,3 +812,39 @@ def test_clip_score_calibration_and_comparability(monkeypatch):
     monkeypatch.setattr(type(C.encoder), "model_id", property(lambda s: "clip:x"))
     assert C.match_score(0.47) > 0.9 and C.match_score(0.31) < 0.1 and 0.55 < C.match_score(0.41) < 0.65
     assert C.comparable("clip:x") and not C.comparable("hash") and not C.comparable("")
+
+
+def test_revision_carries_keep_decisions(client, has_real_db):
+    """修订版沿用原项目「保留原文」的决定：按类型 + 原句匹配，段落/行号变了也能对上。"""
+    if not has_real_db:
+        pytest.skip("没有真实库备份")
+    from app.db import SessionLocal
+    from app.models import LyricCheck, LyricVersion, Project
+    from app.services import lyrics as L
+
+    with SessionLocal() as db:
+        src = Project(name="测试·原项目", destination="x", status="delivered")
+        rev = Project(name="测试·原项目（修订1）", destination="x", status="lyric_review")
+        db.add_all([src, rev])
+        db.flush()
+        v0 = LyricVersion(project_id=src.id, version=3, sections=[], source="ai", checks_done=True)
+        v1 = LyricVersion(project_id=rev.id, version=1, sections=[], source="manual", checks_done=True)
+        db.add_all([v0, v1])
+        db.flush()
+        db.add_all([
+            LyricCheck(lyric_version_id=v0.id, project_id=src.id, type="fact", section="主歌1", line_no=2,
+                       text="千年火口沉静卧，", status="kept", keep_reason="已查证属实"),
+            LyricCheck(lyric_version_id=v1.id, project_id=rev.id, type="fact", section="主歌2", line_no=4,
+                       text="千年火口沉静卧", status="pending"),
+            LyricCheck(lyric_version_id=v1.id, project_id=rev.id, type="rhyme", section="主歌2", line_no=4,
+                       text="千年火口沉静卧", status="pending"),
+        ])
+        db.commit()
+        assert L._carry_decisions(db, v0, v1, prefix="沿用原项目的决定：") == 1
+        rows = {c.type: c for c in L.checks_of(db, v1.id)}
+        assert rows["fact"].status == "kept" and rows["fact"].keep_reason == "沿用原项目的决定：已查证属实"
+        assert rows["rhyme"].status == "pending"        # 原项目没处理过押韵：不能替人拍板
+        for t in (LyricCheck, LyricVersion):
+            db.query(t).filter(t.project_id.in_([src.id, rev.id])).delete()
+        db.query(Project).filter(Project.id.in_([src.id, rev.id])).delete()
+        db.commit()

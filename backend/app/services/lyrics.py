@@ -259,20 +259,26 @@ def save_version(db: Session, project_id: str, sections: list[dict], source: str
     return ver
 
 
-def _carry_decisions(db: Session, old: LyricVersion, new: LyricVersion) -> None:
-    """新版本重跑检查后，原文没变的行沿用上一版「保留原文」的决定（含理由）。
+def _carry_decisions(db: Session, old: LyricVersion, new: LyricVersion, prefix: str = "") -> int:
+    """新版本重跑检查后，原文没变的句子沿用上一版「保留原文」的决定（含理由）。
 
     否则每采纳一条建议，其它已经确认保留的疑点就会被重新标成待处理，人要反复点。
+    按「检查类型 + 句子原文」匹配，不看段落和行号：副歌复唱、段落调整后同一句仍能对上。
+    返回沿用的条数。
     """
-    kept = {(c.type, c.section, c.line_no, c.text): c.keep_reason
+    kept = {(c.type, _norm_line(c.text)): c.keep_reason
             for c in checks_of(db, old.id) if c.status in ("kept", "resolved")}
     if not kept:
-        return
+        return 0
+    n = 0
     for c in checks_of(db, new.id):
-        reason = kept.get((c.type, c.section, c.line_no, c.text))
+        reason = kept.get((c.type, _norm_line(c.text)))
         if reason is not None and c.status == "pending":
-            c.status, c.keep_reason = "kept", reason or "沿用上一版的保留决定"
+            c.status = "kept"
+            c.keep_reason = (prefix + (reason or "沿用上一版的保留决定"))[:500]
+            n += 1
     db.commit()
+    return n
 
 
 def rewrite(db: Session, project_id: str, targets: list[dict], instruction: str = "") -> LyricVersion:
