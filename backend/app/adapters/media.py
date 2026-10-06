@@ -45,6 +45,11 @@ def probe(path: str | Path) -> dict:
         info["duration_s"] = float(data.get("format", {}).get("duration") or 0.0)
         info["has_audio"] = any(s.get("codec_type") == "audio" for s in data.get("streams", []))
         for s in data.get("streams", []):
+            kind = s.get("codec_type")
+            if kind in ("audio", "video") and f"{kind}_start" not in info:
+                info[f"{kind}_start"] = float(s.get("start_time") or 0.0)
+                info[f"{kind}_dur"] = float(s.get("duration") or 0.0)
+        for s in data.get("streams", []):
             if s.get("codec_type") == "video":
                 info["width"] = int(s.get("width") or 0)
                 info["height"] = int(s.get("height") or 0)

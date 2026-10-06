@@ -499,8 +499,9 @@ def test_render_short_end_to_end(tmp_path):
     media.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(clips[0]), "-i", str(audio),
                "-vf", "loop=-1:size=1750,scale=1080:1920", "-t", "160", "-map", "0:v", "-map", "1:a",
                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", job.output_path], timeout=600)
-    qc = R.quality_check(job, R.VARIANTS["short"], expect_s=160, short=True, sub_lines=12,
-                         need_ai_card=True, ai_card=True)
+    # 这条合成片没有烧字幕：本用例只核时长/规格/字卡；字幕抽帧 OCR 在真实成片上另行验证
+    qc = R.quality_check(job, {**R.VARIANTS["short"], "subs": False}, expect_s=160, short=True,
+                         sub_lines=12, need_ai_card=True, ai_card=True)
     assert qc["ok"], qc
     bad = R.quality_check(job, R.VARIANTS["landscape"], expect_s=169, short=False, sub_lines=0,
                           need_ai_card=True, ai_card=False)

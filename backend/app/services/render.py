@@ -241,12 +241,19 @@ def _ai_card_filter(span: float, w: int, h: int) -> str:
             f"x=(w-text_w)/2:y=h/2+{int(fz * 0.25)}:{on}")
 
 
-def quality_check(job: RenderJob, cfg: dict, *, expect_s: float, short: bool,
-                  sub_lines: int, need_ai_card: bool, ai_card: bool) -> dict:
-    """出片自检（PRD V1.1 F3-10）：时长与规格、音轨、字幕、AI 字卡。
+OCR_SAMPLES = 5           # 字幕抽帧数
+OCR_PASS = 0.8            # 抽中的帧里至少 80% 识别出「此刻应该显示的那句歌词」
+OCR_MATCH = 0.6           # 单帧：识别文本与期望歌词的相似度阈值
+AV_SYNC_TOL_S = 0.1       # 音视频流起点 / 时长允许的偏差
 
-    字幕检查目前核的是「字幕文件里确有逐句歌词且已压制」，没有做抽帧 OCR ——
-    OCR 依赖较重，留到真实能力（W3）一起接；这一点在界面上如实说明。
+
+def quality_check(job: RenderJob, cfg: dict, *, expect_s: float, short: bool,
+                  sub_lines: int, need_ai_card: bool, ai_card: bool,
+                  lines: list[dict] | None = None, offset: float = 0.0) -> dict:
+    """出片自检（PRD V1.1 F3-10）：时长与规格、音轨、音画同步、字幕（抽帧 OCR）、AI 字卡。
+
+    字幕不再只看「字幕文件里有没有歌词」：在若干句歌词的中点抽帧，OCR 画面下方，
+    核对识别出的正是这一刻该唱的那句 —— 同时验证了「烧进去了」和「时间对」。
     """
     info = media.probe(job.output_path) if job.output_path else {}
     checks: list[dict] = []
@@ -265,11 +272,85 @@ def quality_check(job: RenderJob, cfg: dict, *, expect_s: float, short: bool,
     w, h = int(info.get("width") or 0), int(info.get("height") or 0)
     add("分辨率", (w, h) == (cfg["w"], cfg["h"]), f"{w}×{h}（要求 {cfg['w']}×{cfg['h']}）")
     add("音轨", bool(info.get("has_audio")), "有" if info.get("has_audio") else "成片没有音轨")
+    if info.get("has_audio") and "video_start" in info:
+        ds = abs(info.get("audio_start", 0.0) - info.get("video_start", 0.0))
+        dd = abs(info.get("audio_dur", 0.0) - info.get("video_dur", 0.0)) if info.get("audio_dur") and info.get("video_dur") else 0.0
+        add("音画同步", ds <= AV_SYNC_TOL_S and dd <= max(AV_SYNC_TOL_S, 0.3),
+            f"音视频起点差 {ds:.2f} 秒、时长差 {dd:.2f} 秒" + ("" if ds <= AV_SYNC_TOL_S else "（音画错位）"))
     if cfg.get("subs"):
-        add("字幕", sub_lines > 0, f"已压制 {sub_lines} 句歌词字幕" if sub_lines else "没有可压制的歌词字幕")
+        if not sub_lines:
+            add("字幕", False, "没有可压制的歌词字幕")
+        else:
+            ok, detail = _ocr_subtitles(job.output_path, lines or [], offset, d)
+            add("字幕", ok, detail)
+    elif lines and job.output_path:
+        ok, detail = _ocr_clean(job.output_path, lines, d)
+        add("无字幕", ok, detail)
     if need_ai_card:
         add("AI 字卡", ai_card, "片尾已加「含 AI 生成画面」" if ai_card else "含 AI 画面但缺片尾字卡")
     return {"ok": all(c["ok"] for c in checks), "checks": checks}
+
+
+def _sample_lines(lines: list[dict], offset: float, dur: float, n: int) -> list[tuple[float, str]]:
+    """在成片时间轴上挑 n 句较长的歌词，返回 (抽帧时刻, 期望字幕)。"""
+    cand = []
+    for ln in lines:
+        s0 = float(ln.get("start_s", 0)) - offset
+        e0 = float(ln.get("end_s", 0)) - offset
+        if e0 - s0 >= 1.5 and s0 >= 0 and e0 <= dur - 0.5 and (ln.get("text") or "").strip():
+            cand.append(((s0 + e0) / 2, ln["text"]))
+    if len(cand) <= n:
+        return cand
+    step = len(cand) / n
+    return [cand[int(i * step)] for i in range(n)]
+
+
+def _ocr_subtitles(video: str, lines: list[dict], offset: float, dur: float) -> tuple[bool, str]:
+    from ..adapters import ocr
+
+    if not ocr.available():
+        return False, "未安装 OCR，无法核验字幕是否烧录（pip install rapidocr）"
+    picks = _sample_lines(lines, offset, dur, OCR_SAMPLES)
+    if not picks:
+        return False, "没有可抽检的歌词句"
+    work = Path(tempfile.gettempdir()) / "wenlvmv_ocr"
+    work.mkdir(parents=True, exist_ok=True)
+    hits, misses = 0, []
+    for k, (t, text) in enumerate(picks):
+        try:
+            img = ocr.grab_frame(video, t, work / f"{Path(video).stem[-12:]}-{k}.jpg")
+            got = ocr.read_subtitle_zone(img)
+            img.unlink(missing_ok=True)
+        except Exception as e:  # noqa: BLE001
+            got = f"（抽帧失败：{e}）"
+        if ocr.similarity(text, got) >= OCR_MATCH:
+            hits += 1
+        else:
+            misses.append(f"{t:.0f}s 应为「{text[:12]}」识别为「{(got or '无')[:12]}」")
+    ok = hits >= max(1, int(round(len(picks) * OCR_PASS)))
+    detail = f"抽帧 OCR {hits}/{len(picks)} 帧字幕与歌词一致"
+    return ok, detail + ("" if ok else "；" + "；".join(misses[:2]))
+
+
+def _ocr_clean(video: str, lines: list[dict], dur: float) -> tuple[bool, str]:
+    """无字幕版（供二次剪辑）：抽帧确认画面里**没有**歌词字幕。"""
+    from ..adapters import ocr
+
+    if not ocr.available():
+        return True, "未安装 OCR，未抽检（无字幕版不压制字幕）"
+    picks = _sample_lines(lines, 0.0, dur, 3)
+    work = Path(tempfile.gettempdir()) / "wenlvmv_ocr"
+    work.mkdir(parents=True, exist_ok=True)
+    found = 0
+    for k, (t, text) in enumerate(picks):
+        try:
+            img = ocr.grab_frame(video, t, work / f"{Path(video).stem[-12:]}-c{k}.jpg")
+            if ocr.similarity(text, ocr.read_subtitle_zone(img)) >= OCR_MATCH:
+                found += 1
+            img.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            continue
+    return found == 0, ("抽帧未发现字幕" if found == 0 else f"{found} 帧出现了歌词字幕（无字幕版不应有）")
 
 
 def render_variant(db: Session, project_id: str, variant: str, progress=None) -> RenderJob:
@@ -394,8 +475,11 @@ def render_variant(db: Session, project_id: str, variant: str, progress=None) ->
         job.size_mb = round(out.stat().st_size / 1024 / 1024, 2) if out.exists() else 0.0
         audio_s = float(media.probe(audio).get("duration_s") or 0) if has_audio else 0.0
         expect = span if cfg.get("short") else (min(span, audio_s) if audio_s else span)
+        if progress:
+            progress(96)    # 出片自检：抽帧核对字幕
         job.qc = quality_check(job, cfg, expect_s=expect, short=bool(cfg.get("short")),
-                               sub_lines=sub_lines, need_ai_card=want_card, ai_card=want_card)
+                               sub_lines=sub_lines, need_ai_card=want_card, ai_card=want_card,
+                               lines=list(tl.lyric_lines or []), offset=offset)
         job.status = "done"
         job.progress = 100
         db.commit()
