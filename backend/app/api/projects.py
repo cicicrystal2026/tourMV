@@ -57,7 +57,7 @@ def create_project(payload: dict = Body(...), db: Session = Depends(get_db)) -> 
             genre=payload.get("genre", ""),
             bpm_min=int(payload.get("bpm_min") or 70),
             bpm_max=int(payload.get("bpm_max") or 100),
-            duration_s=int(payload.get("duration_s") or 180),
+            duration_s=int(payload.get("duration_s") or settings().song_default_seconds),
             vocal=payload.get("vocal", "female"),
             style_prompt=payload.get("style_prompt", ""),
             forbidden=payload.get("forbidden", ""),

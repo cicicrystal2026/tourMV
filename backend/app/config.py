@@ -68,6 +68,9 @@ class Settings:
         self.lyria_model = os.environ.get("LYRIA_MODEL", "lyria-3.5")
         # 文生图（逐句配图）。provider 可选 wanx（通义万相，复用 LLM_API_KEY）
         # 或 seedream（火山方舟 Seedream，需 ARK_API_KEY）。
+        # 歌曲默认时长（秒）。V1.0 是 180；短视频时代 2–3 分钟偏长，且配图数量、审图工作量、
+        # 生图费用都随歌词行数线性增长，所以默认改为 120（主歌 + 副歌 + 主歌 + 尾副歌）
+        self.song_default_seconds = int(os.environ.get("SONG_DEFAULT_SECONDS", "120"))
         self.image_provider = os.environ.get("IMAGE_PROVIDER", "wanx")
         self.ark_api_key = os.environ.get("ARK_API_KEY", "")
         # 即梦（火山引擎视觉智能）用账号 AK/SK 签名，不是方舟的 API Key

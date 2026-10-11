@@ -1064,3 +1064,20 @@ def test_short_video_cut_windows():
     short_song = SimpleNamespace(duration_s=25.0, lyric_lines=lines[:3])
     assert R.cut_window(short_song, 30) == (0.0, 25.0)               # 歌比目标短：用整首
     assert set(R.VARIANTS) >= {"highlight30", "essence60"}
+
+
+def test_song_default_and_structure(client):
+    """默认时长 120 秒；歌词段落与行数随时长变化（V1.0 一律写满六段，所以每首都近 3 分钟）。"""
+    from app.config import settings
+    from app.services.prompts import lyrics_messages, song_structure
+
+    assert settings().song_default_seconds == 120
+    assert song_structure(120) == ([("主歌1", 4), ("副歌", 4), ("主歌2", 4), ("尾副歌", 2)], 14)
+    assert song_structure(90)[1] == 10 and song_structure(180)[1] == 19
+    assert [n for n, _ in song_structure(180)[0]] == ["主歌1", "预副歌", "副歌", "主歌2", "桥段", "尾副歌"]
+    sys = lyrics_messages("杭州·西湖", "流行", ["治愈"], 120, "")[0]["content"]
+    assert "共 14 行" in sys and "桥段" not in sys
+
+    r = client.post("/api/projects", json={"name": "测试·默认时长", "destination": "测试"})
+    assert r.status_code == 200
+    assert client.get(f"/api/projects/{r.json()['id']}").json()["brief"]["duration_s"] == 120

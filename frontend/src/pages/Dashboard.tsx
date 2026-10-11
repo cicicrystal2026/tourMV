@@ -498,7 +498,7 @@ function NewProjectModal({
     genre: '',
     bpm_min: 70,
     bpm_max: 100,
-    duration_s: 180,
+    duration_s: 120,
     vocal: 'female',
     style_prompt: '',
     forbidden: '',
@@ -683,7 +683,7 @@ function ImportBriefModal({
         genre: el.genre || '',
         mood: el.mood || [],
         style_prompt: remix.style_prompt || '',
-        duration_s: 180,
+        duration_s: 120,
       })
       setErr('')
     } catch (e: any) {

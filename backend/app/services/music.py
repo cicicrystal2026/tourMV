@@ -218,7 +218,7 @@ def generate(db: Session, project_id: str, model_keys: list[str], variants: int 
     if ver is None:
         raise ProjectError("还没有歌词版本，先生成并确认歌词")
 
-    budget.ensure_budget(db, _estimate(model_keys, variants, int((brief.duration_s if brief else 180) or 180)),
+    budget.ensure_budget(db, _estimate(model_keys, variants, int((brief.duration_s if brief else 0) or settings().song_default_seconds)),
                          what=f"{len(model_keys) * variants} 首生曲")
 
     if target is None:

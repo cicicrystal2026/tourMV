@@ -73,7 +73,7 @@ class Brief(IdMixin, TimestampMixin, Base):
     genre: Mapped[str] = mapped_column(String(120), default="")
     bpm_min: Mapped[int] = mapped_column(Integer, default=70)
     bpm_max: Mapped[int] = mapped_column(Integer, default=100)
-    duration_s: Mapped[int] = mapped_column(Integer, default=180)
+    duration_s: Mapped[int] = mapped_column(Integer, default=120)
     vocal: Mapped[str] = mapped_column(String(20), default="female")
     style_prompt: Mapped[str] = mapped_column(Text, default="")
     trend_card_ids: Mapped[list] = mapped_column(JSON, default=list)

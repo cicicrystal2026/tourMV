@@ -72,7 +72,7 @@ def generate(db: Session, project_id: str) -> tuple[LyricVersion, bool]:
     payload, real = llm.json_chat(
         prompts.lyrics_messages(
             p.destination, brief.genre if brief else "", mood,
-            brief.duration_s if brief else 180, style,
+            brief.duration_s if brief else settings().song_default_seconds, style,
             brief.forbidden if brief else "", kb_text=kb_text,
         ),
         fallback=prompts.lyrics_fallback(p.destination, mood),

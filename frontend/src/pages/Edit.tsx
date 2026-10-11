@@ -221,6 +221,9 @@ export default function EditPage() {
   const p = detail.project
   const selectedClip = clips.find((c) => c.id === selected)
   const rendering = renders.some((r) => r.status === 'running' || r.status === 'queued')
+  // 「短版 2:30–2:50」要求整首歌至少 150 秒；歌不够长（如默认的 120 秒）时这个版本做不出来
+  const tooShortForShort = !!tl && tl.duration_s < 150
+  const effVariants = variants.filter((k) => !(k === 'short' && tooShortForShort))
   const previewBusy = previewRunning
 
   return (
@@ -285,7 +288,7 @@ export default function EditPage() {
                 className="btn-human"
                 disabled={!!busy || clips.length === 0 || !(detail.gate?.ok ?? true)}
                 title={(detail.gate?.reasons || []).join('；')}
-                onClick={() => act('advance', () => api.advance(p.id, { variants }), () => { setMsg('已派发合成任务'); load(p.id) })}
+                onClick={() => act('advance', () => api.advance(p.id, { variants: effVariants }), () => { setMsg('已派发合成任务'); load(p.id) })}
               >
                 确认精剪，生成多版本
               </button>
@@ -528,7 +531,7 @@ export default function EditPage() {
                   <button
                     className="btn btn-sm"
                     disabled={!!busy || !tl || clips.length === 0}
-                    onClick={() => act('render', () => api.render(p.id, { variants }), () => { setMsg('已派发合成任务'); load(p.id) })}
+                    onClick={() => act('render', () => api.render(p.id, { variants: effVariants }), () => { setMsg('已派发合成任务'); load(p.id) })}
                   >
                     生成所选版本
                   </button>
@@ -537,7 +540,7 @@ export default function EditPage() {
               bodyClass="p-4"
             >
               <div className="flex flex-wrap gap-2 mb-1">
-                {variantOpts.map((o: any) => (
+                {variantOpts.filter((o: any) => !(o.key === 'short' && tooShortForShort)).map((o: any) => (
                   <label
                     key={o.key}
                     title={o.subs ? '带歌词字幕' : '无字幕，供二次剪辑用'}

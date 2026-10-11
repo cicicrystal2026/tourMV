@@ -30,7 +30,7 @@ def ensure_editable(p: Project) -> None:
 def create(db: Session, *, name: str, destination: str, type_: str = "sample",
            language: str = "zh", trend_card_ids: list[str] | None = None,
            mood: list[str] | None = None, genre: str = "", bpm_min: int = 70,
-           bpm_max: int = 100, duration_s: int = 180, vocal: str = "female",
+           bpm_max: int = 100, duration_s: int = 120, vocal: str = "female",
            style_prompt: str = "", forbidden: str = "") -> Project:
     p = Project(name=name, destination=destination, type=type_, language=language,
                 status="briefing", status_note=sm.STATES["briefing"].enter_note)

@@ -12,7 +12,7 @@ from .. import state_machine as sm
 from ..adapters import align, llm, media
 from ..adapters.music import base as music_base
 from ..config import settings
-from ..models import Brief, Job, LyricVersion, MusicCandidate, MusicModel, Project, RenderJob
+from ..models import Timeline, Brief, Job, LyricVersion, MusicCandidate, MusicModel, Project, RenderJob
 from ..queue import JobContext, enqueue, handler
 from ..services import assets as assets_svc
 from ..services import edit as edit_svc
@@ -149,7 +149,7 @@ def h_music_one(ctx: JobContext) -> None:
     req = music_base.GenRequest(
         lyrics=lyrics_text,
         style_prompt=(job.payload.get("style_prompt") or (brief.style_prompt if brief else "")),
-        duration_s=int((brief.duration_s if brief else 180) or 180),
+        duration_s=int((brief.duration_s if brief else 0) or settings().song_default_seconds),
         vocal=(brief.vocal if brief else "female"),
         seed=abs(hash(f"{cand.id}{cand.variant}")) % 10**6,
         title=proj.name if proj else "",
@@ -217,7 +217,7 @@ def h_music_one(ctx: JobContext) -> None:
             brief_d = {"genre": brief.genre if brief else "", "mood": brief.mood if brief else [],
                        "bpm_min": brief.bpm_min if brief else 70,
                        "bpm_max": brief.bpm_max if brief else 100,
-                       "duration_s": brief.duration_s if brief else 180,
+                       "duration_s": brief.duration_s if brief else settings().song_default_seconds,
                        "vocal": brief.vocal if brief else ""}
             cand_d = {"model_name": "", "bpm": cand.bpm, "duration_s": cand.duration_s,
                       "vocal": cand.vocal}
@@ -398,6 +398,10 @@ def h_render_all(ctx: JobContext) -> None:
     pid = ctx.job().project_id
     variants = ctx.job().payload.get("variants") or list(render_svc.VARIANTS)
     variants = [v for v in variants if v in render_svc.VARIANTS] or list(render_svc.VARIANTS)
+    # 「短版 2:30–2:50」要求整首歌至少 150 秒：歌不够长时跳过，不出一个和竖版几乎一样的重复版本
+    tl0 = ctx.db.execute(select(Timeline).where(Timeline.project_id == ctx.job().project_id)).scalar_one_or_none()
+    if tl0 is not None and float(tl0.duration_s or 0) < render_svc.SHORT_MIN_S and len(variants) > 1:
+        variants = [v for v in variants if v != "short"]
     done, failed, qc_failed = [], [], []
     for i, v in enumerate(variants):
         base = int(100 * i / len(variants))
