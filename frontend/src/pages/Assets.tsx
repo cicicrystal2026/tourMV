@@ -36,10 +36,15 @@ export default function AssetsPage() {
     }
   }, [q, filters, onlyUsable])
 
+  // 受控词表（F4-12）与缺标签的素材数
+  const [vocab, setVocab] = useState<Record<string, string[]>>({})
+  const [untagged, setUntagged] = useState(0)
   const loadFacets = useCallback(async () => {
     const r = await api.assetFacets()
     setFacets(r.facets)
     setStats(r.stats)
+    setVocab(r.vocab || {})
+    setUntagged(r.untagged || 0)
   }, [])
 
   useEffect(() => {
@@ -101,6 +106,19 @@ export default function AssetsPage() {
             <a className="btn" href={api.assetExportUrl} download>
               导出授权清单
             </a>
+            {untagged > 0 && (
+              <button
+                className="btn"
+                disabled={!!busy}
+                title={`${untagged} 条素材还没有季节/时段/天气/情绪等标签，筛选不到。自动打标每条约 ¥0.004`}
+                onClick={() => {
+                  if (!window.confirm(`给 ${untagged} 条缺标签的素材自动打标？预计约 ¥${(untagged * 0.004).toFixed(2)}，在后台进行。`)) return
+                  act('retag-missing', () => api.retagMissing(), () => setMsg('已开始在后台补全标签，完成后刷新本页可见'))
+                }}
+              >
+                补全标签（{untagged}）
+              </button>
+            )}
             <button className="btn" onClick={() => setShowAiGen(true)}>
               AI 生成景点素材
             </button>
@@ -260,6 +278,7 @@ export default function AssetsPage() {
                 }}
                 onAct={act}
                 setMsg={setMsg}
+                vocab={vocab}
                 onClose={() => setSelected(null)}
               />
             )}
@@ -298,8 +317,10 @@ function DetailPanel({
   onReload,
   onAct,
   setMsg,
+  vocab,
   onClose,
 }: {
+  vocab: Record<string, string[]>
   a: any
   busy: string
   onReload: () => Promise<void>
@@ -367,14 +388,24 @@ function DetailPanel({
             ))}
           </div>
           <div className="mt-2 flex items-center gap-1.5">
-            <select className="input w-[92px]" value={newTag.dim} onChange={(e) => setNewTag({ ...newTag, dim: e.target.value })}>
+            <select className="input w-[92px]" value={newTag.dim} onChange={(e) => setNewTag({ dim: e.target.value, value: '' })}>
               {DIMS.map((d) => (
                 <option key={d} value={d}>
                   {TAG_DIM_LABEL[d]}
                 </option>
               ))}
             </select>
-            <input className="input flex-1" placeholder="新增标签" value={newTag.value} onChange={(e) => setNewTag({ ...newTag, value: e.target.value })} />
+            {newTag.dim === 'place' ? (
+              <input className="input flex-1" placeholder="景点名，如 断桥" maxLength={20} value={newTag.value} onChange={(e) => setNewTag({ ...newTag, value: e.target.value })} />
+            ) : (
+              // 受控词表（F4-12）：季节/时段/天气/情绪/镜头/主体只能从词表选，筛选项才不会长满整句
+              <select className="input flex-1" value={newTag.value} onChange={(e) => setNewTag({ ...newTag, value: e.target.value })}>
+                <option value="">从词表选择…</option>
+                {(vocab[newTag.dim] || []).map((v) => (
+                  <option key={v} value={v}>{v}</option>
+                ))}
+              </select>
+            )}
             <button
               className="btn btn-sm"
               disabled={!newTag.value || busy === 'tag'}
@@ -396,6 +427,25 @@ function DetailPanel({
           >
             用 VLM 重新打标
           </button>
+          {newTag.dim !== 'place' && (
+            <button
+              className="mt-1.5 text-[11px] text-ink-faint underline text-left"
+              onClick={() => {
+                const v = window.prompt(`给「${TAG_DIM_LABEL[newTag.dim]}」词表新增一个取值（1–6 个字的短词）。新增后所有素材都能选用：`)
+                if (v && v.trim())
+                  onAct('vocab', () => api.addVocab(newTag.dim, v.trim()), () => { setMsg(`词表已新增「${v.trim()}」`); onReload() })
+              }}
+            >
+              词表里没有合适的词？维护词表
+            </button>
+          )}
+          {(a.gen_prompt || a.gen_model) && (
+            <div className="mt-3 border-t border-line pt-3">
+              <div className="text-[12px] font-medium mb-1">生成信息</div>
+              <div className="text-[11px] text-ink-soft">模型：{a.gen_model || '—'}</div>
+              <div className="text-[11px] text-ink-faint leading-relaxed mt-0.5 break-words">提示词：{a.gen_prompt || '—'}</div>
+            </div>
+          )}
         </div>
 
         <div className="border-t border-line pt-3 flex flex-col gap-2">

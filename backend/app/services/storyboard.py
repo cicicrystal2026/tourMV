@@ -168,11 +168,16 @@ def _asset_for_shot(db: Session, row: StoryboardShot, p: Project, *, img: Path,
     db.flush()
 
     db.execute(delete(AssetTag).where(AssetTag.asset_id == a.id))
-    rows = [("place", p.destination or ""), ("subject", (row.prompt or row.place)[:120])]
-    rows += [("mood", k) for k in (row.keywords or "").split(",") if k.strip()][:4]
-    for dim, val in rows:
-        if val:
-            db.add(AssetTag(asset_id=a.id, dim=dim, value=val, source="ai"))
+    from .. import vocab
+
+    # 提示词进生成信息（F4-6），标签只留景点名 + 能归并进词表的情绪词（F4-12）
+    a.gen_model = image_ad.model_name(provider) if provider in image_ad.PROVIDERS else (provider or "")
+    a.gen_prompt = (row.prompt or "")[:1500]
+    spot = vocab.clean_place(row.place)
+    if spot:
+        db.add(AssetTag(asset_id=a.id, dim="place", value=spot, source="ai"))
+    for val in vocab.normalize_many("mood", [k for k in (row.keywords or "").split(",")], limit=2):
+        db.add(AssetTag(asset_id=a.id, dim="mood", value=val, source="ai"))
     db.flush()
     return a
 

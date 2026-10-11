@@ -195,6 +195,8 @@ export const api = {
     return get(`/api/assets${qs ? `?${qs}` : ''}`)
   },
   assetFacets: () => get('/api/assets/facets'),
+  addVocab: (dim: string, value: string) => post('/api/assets/vocab', { dim, value }),
+  retagMissing: () => post('/api/assets/retag-missing', {}),
   asset: (id: string) => get(`/api/assets/${id}`),
   updateAsset: (id: string, body: Json) => put(`/api/assets/${id}`, body),
   retagAsset: (id: string, hint = '') => post(`/api/assets/${id}/retag`, { hint }),

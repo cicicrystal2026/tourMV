@@ -16,6 +16,7 @@ from ..adapters import align as align_ad
 from ..adapters import clip as clip_ad, media, vlm
 from ..adapters import image as image_ad
 from ..adapters import llm
+from .. import vocab
 from ..config import settings
 from ..models import Asset, AssetTag, TimelineClip
 from ..serialize import asset_url, basename
@@ -84,14 +85,29 @@ def tag_asset(db: Session, asset_id: str, hint: str = "") -> dict:
             got = media.make_thumb(a.file_path, p, at_s=t)
             if got:
                 frames.append(got)
-    result = vlm.tag_frames(frames, hint=hint or a.name)
+    if not frames and a.thumb_path and Path(a.thumb_path).exists():
+        frames.append(a.thumb_path)
+    result = vlm.tag_frames(frames, hint=hint or a.name, destination=a.destination or "")
     conf = float(result.get("confidence") or 0.0)
 
-    db.query(AssetTag).filter(AssetTag.asset_id == a.id).delete()
+    # 人工改过的标签保留：重新打标只替换模型给的那部分
+    # 已有景点名的不让模型覆盖：AI 分镜素材的景点来自分镜（「锦江大峡谷岩层剖面」），
+    # 比模型看图猜的（「长白山火山地貌」）准确
+    has_place = db.execute(select(AssetTag).where(AssetTag.asset_id == a.id, AssetTag.dim == "place")).first()
+    q = db.query(AssetTag).filter(AssetTag.asset_id == a.id, AssetTag.source != "manual")
+    if has_place:
+        q = q.filter(AssetTag.dim != "place")
+    q.delete()
+    have = {(t.dim, t.value) for t in db.execute(select(AssetTag).where(AssetTag.asset_id == a.id)).scalars()}
     for dim in TAG_DIMS:
-        for val in (result.get(dim) or [])[:3]:
-            db.add(AssetTag(asset_id=a.id, dim=dim, value=str(val), source="ai"))
+        if dim == "place" and has_place:
+            continue
+        for val in vocab.normalize_many(dim, result.get(dim) or []):
+            if (dim, val) not in have:
+                db.add(AssetTag(asset_id=a.id, dim=dim, value=val, source="ai"))
     a.tag_confidence = conf
+    if result.get("has_identifiable_person") and not a.has_portrait:
+        a.has_portrait = True      # 画面里有可识别人物：肖像权未登记前不进镜头候选
     db.commit()
     embed_asset(db, a.id)
     return {"asset_id": a.id, "tags": {d: result.get(d, []) for d in TAG_DIMS},
@@ -230,6 +246,9 @@ def facets(db: Session) -> dict:
         for dim, vals in tags.items():
             if dim in facets:
                 facets[dim] = sorted(set(facets[dim]) | set(vals))
+    # 受控维度的筛选项只出词表里的词，并按词表顺序排（春夏秋冬，而不是按拼音）
+    for dim in vocab.CONTROLLED:
+        facets[dim] = [v for v in vocab.values(dim) if v in set(facets[dim])]
     statuses = sorted({a.license_status for a in rows})
     dests = sorted({a.destination for a in rows if a.destination})
     return {"tags": facets, "license_status": statuses, "destination": dests}
@@ -260,8 +279,17 @@ def update(db: Session, asset_id: str, *, name: str | None = None, destination: 
                 db.delete(t)
         db.commit()
     if add_tags:
+        have = {(t.dim, t.value) for t in db.execute(select(AssetTag).where(AssetTag.asset_id == a.id)).scalars()}
         for t in add_tags:
-            db.add(AssetTag(asset_id=a.id, dim=t.get("dim", ""), value=t.get("value", ""), source="manual"))
+            dim, raw = t.get("dim", ""), t.get("value", "")
+            val = vocab.normalize(dim, raw)
+            if val is None:
+                # 受控词表（F4-12）：不在词表里的取值不能随手加，否则筛选项又会长满整句
+                allowed = " / ".join(vocab.values(dim)) or "2–20 字的景点名"
+                raise ProjectError(f"「{raw}」不在词表里。可选：{allowed}；确需新增请先维护词表")
+            if (dim, val) not in have:
+                db.add(AssetTag(asset_id=a.id, dim=dim, value=val, source="manual"))
+                have.add((dim, val))
         db.commit()
     if del_tags or add_tags:
         embed_asset(db, a.id)  # 标签变更后重新向量化（PRD F4-6）
@@ -287,6 +315,8 @@ def detail(db: Session, asset_id: str) -> dict:
         "has_portrait": a.has_portrait, "usable": a.usable,
         "tag_confidence": a.tag_confidence, "need_review": a.tag_confidence < CONF_THRESHOLD,
         "tags": tmap,
+        # AI 素材的生成信息（F4-6）：模型与提示词单列展示，不混在标签里
+        "gen_model": a.gen_model, "gen_prompt": a.gen_prompt,
         "usage": [{"project_id": c.project_id, "clip_id": c.id, "lyric_line": c.lyric_line}
                   for c in usage],
         "expiring_soon": _expiring_soon(a.valid_until),
@@ -515,11 +545,13 @@ def _upsert_ai_asset(db: Session, *, name: str, clip: str, thumb: str,
     db.flush()
 
     db.execute(delete(AssetTag).where(AssetTag.asset_id == a.id))
-    rows = [("place", destination), ("subject", prompt[:120])]
-    rows += [("mood", k) for k in keywords[:4]]
-    for dim, val in rows:
-        if val:
-            db.add(AssetTag(asset_id=a.id, dim=dim, value=val, source="ai"))
+    # 提示词存到生成信息里，不再当标签；标签只留景点名和能归并进词表的情绪词
+    a.gen_model, a.gen_prompt = (a.licensor or "").replace("AI 生成（", "").rstrip("）"), prompt[:1500]
+    place = vocab.clean_place(name)
+    if place:
+        db.add(AssetTag(asset_id=a.id, dim="place", value=place, source="ai"))
+    for val in vocab.normalize_many("mood", keywords, limit=2):
+        db.add(AssetTag(asset_id=a.id, dim="mood", value=val, source="ai"))
     db.flush()
     return a
 
@@ -534,9 +566,72 @@ def asset_descriptions(db: Session, limit: int = 200) -> list[dict]:
     out = []
     for a in assets[:limit]:
         t = tags.get(a.id, {})
-        parts = [a.name, a.destination or ""]
-        for dim in ("subject", "place", "mood", "time", "weather", "camera", "season"):
+        parts = [a.name, a.destination or "", (a.gen_prompt or "")[:120]]
+        for dim in ("place", "subject", "mood", "time", "weather", "camera", "season"):
             parts += (t.get(dim) or [])
         desc = " ".join(x for x in parts if x).strip()
         out.append({"id": a.id, "name": a.name, "desc": desc[:200]})
     return out
+
+
+# ------------------------------------------------------------------ 受控词表：存量清洗与批量补标
+def clean_tags(db: Session) -> dict:
+    """把存量标签按受控词表清洗一遍（幂等，启动时跑）。
+
+    - 受控维度：能归并的改成词表词，归并不了的删除；
+    - 画面主体里的整句（其实是生图提示词）：搬到素材的 gen_prompt，再删标签；
+    - 地点：去括号、截成短名称。
+    """
+    moved = fixed = dropped = 0
+    seen: set[tuple[str, str, str]] = set()
+    for t in list(db.execute(select(AssetTag)).scalars()):
+        norm = vocab.normalize(t.dim, t.value)
+        if norm is None:
+            if t.dim == "subject" and len(t.value or "") > 6:
+                a = db.get(Asset, t.asset_id)
+                if a is not None and not a.gen_prompt:
+                    a.gen_prompt = t.value
+                    a.gen_model = a.gen_model or (a.licensor or "").replace("AI 生成（", "").rstrip("）")
+                    moved += 1
+            db.delete(t)
+            dropped += 1
+            continue
+        key = (t.asset_id, t.dim, norm)
+        if key in seen:
+            db.delete(t)          # 归并后重复
+            dropped += 1
+            continue
+        seen.add(key)
+        if norm != t.value:
+            t.value = norm
+            fixed += 1
+    db.commit()
+    return {"normalized": fixed, "dropped": dropped, "prompts_moved": moved}
+
+
+def untagged_ids(db: Session) -> list[str]:
+    """受控维度一个标签都没有的素材（清洗后的 AI 素材、打标失败的上传素材）。"""
+    tmap = tag_map(db, [a.id for a in db.execute(select(Asset)).scalars()])
+    out = []
+    for a in db.execute(select(Asset).order_by(Asset.created_at.desc())).scalars():
+        t = tmap.get(a.id, {})
+        if not any(t.get(d) for d in vocab.CONTROLLED):
+            out.append(a.id)
+    return out
+
+
+def retag_missing(db: Session, limit: int | None = None, on_progress=None) -> dict:
+    """给缺标签的素材补一次自动打标（每条一次 VLM 调用）。"""
+    ids = untagged_ids(db)
+    ids = ids[:limit] if limit else ids
+    ok = low = 0
+    for i, aid in enumerate(ids):
+        try:
+            r = tag_asset(db, aid)
+            ok += 1
+            low += 1 if r.get("need_review") else 0
+        except Exception:  # noqa: BLE001
+            db.rollback()
+        if on_progress:
+            on_progress(i + 1, len(ids))
+    return {"total": len(ids), "tagged": ok, "need_review": low}

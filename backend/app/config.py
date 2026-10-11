@@ -87,7 +87,7 @@ class Settings:
         # 视觉 / 向量 / 对齐
         self.vlm_base_url = os.environ.get("VLM_BASE_URL", "").rstrip("/")
         self.vlm_api_key = os.environ.get("VLM_API_KEY", "")
-        self.vlm_model = os.environ.get("VLM_MODEL", "qwen-vl-plus")
+        self.vlm_model = os.environ.get("VLM_MODEL", "qwen3-vl-plus")   # qwen-vl-plus 已被平台下线
         self.clip_model = os.environ.get("CLIP_MODEL", "OFA-Sys/chinese-clip-vit-base-patch16")
         # 实拍镜头「合格」的匹配分阈值（PRD V1.1 F6-2，标定后的 0–1 分）
         self.match_threshold = float(os.environ.get("MATCH_THRESHOLD", "0.6"))

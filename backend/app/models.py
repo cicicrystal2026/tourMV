@@ -228,6 +228,9 @@ class Asset(IdMixin, TimestampMixin, Base):
     embedding: Mapped[list | None] = mapped_column(JSON, nullable=True)
     # 向量出自哪个编码器（clip:<模型名> / hash）。换编码器后旧向量不可比，需重建
     embedding_model: Mapped[str] = mapped_column(String(120), default="")
+    # AI 素材的生成信息（PRD V1.1 F4-6）。V1.0 把提示词整句写进「画面主体」标签，污染了筛选项
+    gen_model: Mapped[str] = mapped_column(String(120), default="")
+    gen_prompt: Mapped[str] = mapped_column(Text, default="")
     # PRD V1.1 F4-10：来源 shot（实拍）/ ai（AI 生成）。AI 素材不计入「已授权」
     source: Mapped[str] = mapped_column(String(10), default="shot")
     # 种子演示数据（占位镜头与虚构授权），补登真实授权前不得进入样片

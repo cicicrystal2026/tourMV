@@ -42,7 +42,45 @@ def export_csv(db: Session = Depends(get_db)) -> PlainTextResponse:
 
 @router.get("/facets")
 def facets(db: Session = Depends(get_db)) -> dict:
-    return {"facets": svc.facets(db), "stats": svc.stats(db), "dims": svc.TAG_DIMS}
+    from .. import vocab
+
+    return {"facets": svc.facets(db), "stats": svc.stats(db), "dims": svc.TAG_DIMS,
+            # 受控词表（F4-12）：前端加标签时只能从这里选；place 是自由的景点名
+            "vocab": vocab.all_values(), "untagged": len(svc.untagged_ids(db))}
+
+
+@router.post("/vocab")
+def add_vocab(payload: dict = Body(...)) -> dict:
+    """词表维护：给受控维度新增一个取值。"""
+    from .. import vocab
+
+    try:
+        return {"dim": payload.get("dim"), "values": vocab.add_value(payload.get("dim", ""), payload.get("value", ""))}
+    except ValueError as e:
+        _fail(ProjectError(str(e)))
+
+
+@router.post("/retag-missing")
+def retag_missing(limit: int = 0, db: Session = Depends(get_db)) -> dict:
+    """给缺标签的素材批量补打标（后台任务，每条一次 VLM 调用，约 ¥0.004/条）。"""
+    from ..models import Job
+    from ..services import budget
+
+    n = len(svc.untagged_ids(db))
+    n = min(n, limit) if limit else n
+    if n == 0:
+        return {"queued": False, "total": 0}
+    busy = db.execute(select(Job).where(Job.type == "retag_assets",
+                                        Job.status.in_(("queued", "running")))).scalars().first()
+    if busy is not None:
+        return {"queued": True, "job_id": busy.id, "duplicate": True}
+    try:
+        budget.ensure_budget(db, n * 0.004, what=f"{n} 条素材打标")
+    except ProjectError as e:
+        _fail(e)
+    j = enqueue(db, "retag_assets", queue="api", name=f"补全素材标签（{n} 条）", payload={"limit": limit})
+    db.commit()
+    return {"queued": True, "job_id": j.id, "total": n}
 
 
 @router.post("/seed")

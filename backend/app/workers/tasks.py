@@ -294,6 +294,17 @@ def h_render_preview(ctx: JobContext) -> None:
     ctx.set_result({"elapsed_s": round(_t.time() - t0, 1), "size_mb": job.size_mb})
 
 
+@handler("retag_assets")
+def h_retag_assets(ctx: JobContext) -> None:
+    from ..services import assets as assets_svc
+
+    def prog(n: int, total: int) -> None:
+        ctx.progress(int(100 * n / max(1, total)), f"自动打标 {n}/{total}")
+
+    ctx.set_result(assets_svc.retag_missing(ctx.db, limit=int((ctx.job().payload or {}).get("limit") or 0) or None,
+                                            on_progress=prog))
+
+
 # ------------------------------------------------------------------ 素材向量重建
 @handler("reembed_assets")
 def h_reembed_assets(ctx: JobContext) -> None:

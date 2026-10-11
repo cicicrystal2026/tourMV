@@ -17,24 +17,66 @@ import requests
 from ..config import settings
 from ..observability import record
 
-DIMS = ["place", "season", "time", "weather", "mood", "camera", "subject"]
+from .. import vocab
 
-VOCAB: dict[str, list[str]] = {
-    "place": ["古塔", "古城", "老街", "山川", "江河", "湖泊", "海岸", "古镇", "村落", "园林",
-              "沙漠", "草原", "雪原", "石窟", "寺院", "梯田", "大桥", "城市天际线"],
-    "season": ["春", "夏", "秋", "冬"],
-    "time": ["清晨", "正午", "黄昏", "夜晚", "星空"],
-    "weather": ["晴", "阴", "雨", "雾", "雪", "多云"],
-    "mood": ["宁静", "壮阔", "治愈", "热闹", "神秘", "苍凉"],
-    "camera": ["慢推", "平移", "航拍", "环绕", "手持", "固定", "延时", "慢摇"],
-    "subject": ["人物", "建筑", "山水", "花木", "动物", "街景", "无人"],
-}
+DIMS = vocab.DIMS
 
-SYSTEM = """你是文旅视频素材的标注员。根据给定的视频关键帧，输出七个维度的中文标签。
-只输出 JSON，结构为：
-{"place":[], "season":[], "time":[], "weather":[], "mood":[], "camera":[], "subject":[],
- "confidence": 0.0-1.0, "has_identifiable_person": true/false}
-要求：宁缺毋滥，不确定的维度给空数组；置信度低于 0.7 表示需要人工纠错。"""
+# 兜底路径用的地点类别词（真模型给的是具体景点名，不受这张表限制）
+_PLACE_HINTS = ["古塔", "古城", "老街", "山川", "江河", "湖泊", "海岸", "古镇", "村落", "园林",
+                "沙漠", "草原", "雪原", "石窟", "寺院", "梯田", "大桥", "城市天际线"]
+VOCAB: dict[str, list[str]] = {"place": _PLACE_HINTS, **vocab.BASE}
+
+
+def _system(destination: str) -> str:
+    """打标提示词：受控维度把允许的取值逐个列给模型（PRD V1.1 F4-12），只能从中选。"""
+    v = vocab.all_values()
+    lines = "\n".join(f"- {k}（{label}）：{' / '.join(v[k])}" for k, label in (
+        ("season", "季节"), ("time", "时段"), ("weather", "天气"), ("mood", "情绪"),
+        ("camera", "镜头运动"), ("subject", "画面主体")))
+    dest = f"这批关键帧来自目的地「{destination}」。" if destination else ""
+    return f"""你是文旅视频素材的标注员。{dest}根据给定的视频关键帧输出标签。
+下面六个维度**只能从给出的取值里选**，每个维度最多 2 个，看不出来就给空数组，不要自造词：
+{lines}
+另外：
+- place：画面里的具体景点名（如「断桥」「天池」），2–10 个字的名称，不要写句子；认不出具体景点就给空数组
+- confidence：你对整组标签的把握，0.0–1.0；低于 0.7 会转人工纠错，没把握就如实给低分
+- has_identifiable_person：画面里有没有能认出长相的人（涉及肖像权）
+只输出 JSON：
+{{"place":[], "season":[], "time":[], "weather":[], "mood":[], "camera":[], "subject":[],
+ "confidence": 0.0, "has_identifiable_person": false}}"""
+
+
+# 备用模型：阿里云会下线旧模型（qwen-vl-plus 于 2026-10 起返回 404 Model not exist，
+# 打标和图文预审同时失效且没有任何提示）。主模型不存在时按顺序换下一个，并记住可用的那个。
+FALLBACK_MODELS = ["qwen3-vl-plus", "qwen3-vl-flash", "qwen-vl-max-latest"]
+_working_model: str | None = None
+
+
+def _chat(messages: list[dict], temperature: float = 0.2, timeout: int = 180) -> str:
+    """调用 VLM，返回文本内容。模型不存在时自动换备用模型；其余错误带上游原因抛出。"""
+    global _working_model
+    from .llm import explain_error
+
+    s = settings()
+    order = [m for m in dict.fromkeys([_working_model or s.vlm_model, s.vlm_model, *FALLBACK_MODELS]) if m]
+    last = ""
+    for m in order:
+        r = requests.post(f"{s.vlm_base_url}/chat/completions",
+                          headers={"Authorization": f"Bearer {s.vlm_api_key}"},
+                          json={"model": m, "messages": messages, "temperature": temperature},
+                          timeout=timeout)
+        if r.status_code == 404 or "model_not_found" in r.text[:300]:
+            last = f"模型 {m} 不存在（可能已被平台下线）"
+            continue
+        if r.status_code >= 400:
+            raise RuntimeError(explain_error(r.status_code, r.text))
+        _working_model = m
+        return r.json()["choices"][0]["message"]["content"]
+    raise RuntimeError(f"{last}；备用模型也不可用，请在 .env 里把 VLM_MODEL 改成当前可用的视觉模型")
+
+
+def current_model() -> str:
+    return _working_model or settings().vlm_model
 
 
 def _heuristic(frame_paths: list[str], hint: str = "") -> dict:
@@ -62,39 +104,45 @@ def _heuristic(frame_paths: list[str], hint: str = "") -> dict:
     return out
 
 
-def _real(frame_paths: list[str]) -> dict:
+def _real(frame_paths: list[str], destination: str = "") -> dict:
+    import time
+
     s = settings()
+    t0 = time.time()
     content: list[dict] = [{"type": "text", "text": "标注这些关键帧。"}]
     for p in frame_paths[:4]:
         b64 = base64.b64encode(Path(p).read_bytes()).decode()
         content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-    r = requests.post(
-        f"{s.vlm_base_url}/chat/completions",
-        headers={"Authorization": f"Bearer {s.vlm_api_key}"},
-        json={
-            "model": s.vlm_model,
-            "messages": [{"role": "system", "content": SYSTEM},
-                         {"role": "user", "content": content}],
-            "temperature": 0.2,
-        },
-        timeout=180,
-    )
-    r.raise_for_status()
-    raw = r.json()["choices"][0]["message"]["content"]
+    raw = _chat([{"role": "system", "content": _system(destination)},
+                 {"role": "user", "content": content}])
     raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     data = json.loads(raw)
+    # 过词表：模型偶尔仍会写近义词或整句，归并不了的直接丢弃
+    for dim in DIMS:
+        data[dim] = vocab.normalize_many(dim, data.get(dim) if isinstance(data.get(dim), list) else [data.get(dim)],
+                                         limit=1 if dim == "place" else 2)
+    try:
+        data["confidence"] = max(0.0, min(1.0, float(data.get("confidence") or 0.0)))
+    except (TypeError, ValueError):
+        data["confidence"] = 0.0
     data["engine"] = "vlm"
+    record(kind="vlm", provider="qwen-vl", model=current_model(), purpose="tagging", status="ok",
+           elapsed_s=time.time() - t0, cost=0.004)
     return data
 
 
-def tag_frames(frame_paths: list[str], hint: str = "") -> dict:
+def tag_frames(frame_paths: list[str], hint: str = "", destination: str = "") -> dict:
     s = settings()
-    if s.vlm_base_url and s.vlm_api_key and not s.force_mock:
+    if frame_paths and s.vlm_base_url and s.vlm_api_key and not s.force_mock:
         try:
-            return _real(frame_paths)
+            return _real(frame_paths, destination)
         except Exception as e:  # noqa: BLE001 - 打标失败不能阻塞上传
             record(kind="vlm", provider="qwen-vl", model=s.vlm_model, purpose="tagging",
                    status="error", error=str(e))
+            # 真模型配了却失败：留空并标成待纠错，**不**用随机词补位 ——
+            # 实测模型下线期间，「天池」被随机标成了「星空 / 动物」，比没有标签更糟
+            return {**{d: [] for d in DIMS}, "confidence": 0.0, "has_identifiable_person": False,
+                    "engine": "failed", "error": str(e)[:200]}
     return _heuristic(frame_paths, hint)
 
 
@@ -145,24 +193,13 @@ def judge_image(img_path: str, line: str, place: str, destination: str,
     b64 = base64.b64encode(Path(img_path).read_bytes()).decode()
     t0 = time.time()
     try:
-        r = requests.post(
-            f"{s.vlm_base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {s.vlm_api_key}"},
-            json={
-                "model": s.vlm_model,
-                "messages": [
-                    {"role": "system", "content": JUDGE_SYSTEM},
-                    {"role": "user", "content": [
-                        {"type": "text", "text": f"目的地：{destination}\n景点：{place}\n歌词：{line}"},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                    ]},
-                ],
-                "temperature": 0.1,
-            },
-            timeout=120,
-        )
-        r.raise_for_status()
-        raw = r.json()["choices"][0]["message"]["content"]
+        raw = _chat([
+            {"role": "system", "content": JUDGE_SYSTEM},
+            {"role": "user", "content": [
+                {"type": "text", "text": f"目的地：{destination}\n景点：{place}\n歌词：{line}"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+            ]},
+        ], temperature=0.1, timeout=120)
         raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         data = json.loads(raw)
         score = _score(data)

@@ -897,3 +897,50 @@ def test_audit_fixes(client, has_real_db, monkeypatch):
     auth._FAILS.clear()
     assert client.post("/api/auth/login", json={"password": "s3cret"}).status_code == 200
     auth._FAILS.clear()
+
+
+def test_controlled_vocabulary(client, has_real_db):
+    """F4-12 受控词表：近义词归并、整句丢弃、景点截成短名；人工加标签只能选词表；存量清洗把提示词搬走。"""
+    from app import vocab
+    from app.db import SessionLocal
+    from app.models import Asset, AssetTag
+    from app.services import assets as A
+
+    assert vocab.normalize("time", "傍晚") == "黄昏" and vocab.normalize("mood", "静谧") == "宁静"
+    assert vocab.normalize("mood", "写实纪实摄影，雪原延时") is None
+    assert vocab.normalize("season", "秋") == "秋" and vocab.normalize("weather", "龙卷风") is None
+    assert vocab.clean_place("长白山天池（北坡天文峰观景台）") == "长白山天池"
+    assert vocab.normalize_many("camera", ["航拍", "鸟瞰", "乱写"]) == ["航拍"]
+    with pytest.raises(ValueError):
+        vocab.add_value("mood", "这是一整句话不是词")
+
+    with SessionLocal() as db:
+        a = Asset(name="测试·词表", file_path="", destination="测试", source="ai", licensor="AI 生成（通义万相）")
+        db.add(a)
+        db.flush()
+        db.add_all([
+            AssetTag(asset_id=a.id, dim="subject", value="航拍雪线以上裸露浮石山脊，强风卷雪掠过尖锐玄武岩棱角", source="ai"),
+            AssetTag(asset_id=a.id, dim="mood", value="静谧", source="ai"),
+            AssetTag(asset_id=a.id, dim="mood", value="宁静", source="ai"),
+            AssetTag(asset_id=a.id, dim="mood", value="cinematic", source="ai"),
+            AssetTag(asset_id=a.id, dim="place", value="天池（北坡）", source="ai"),
+        ])
+        db.commit()
+        aid = a.id
+        A.clean_tags(db)
+        db.refresh(a)
+        tags = sorted((t.dim, t.value) for t in db.query(AssetTag).filter(AssetTag.asset_id == aid))
+        assert tags == [("mood", "宁静"), ("place", "天池")]
+        assert a.gen_prompt.startswith("航拍雪线") and a.gen_model == "通义万相"
+        assert A.clean_tags(db) == {"normalized": 0, "dropped": 0, "prompts_moved": 0}     # 幂等
+
+    r = client.put(f"/api/assets/{aid}", json={"add_tags": [{"dim": "weather", "value": "乱七八糟的天气"}]})
+    assert r.status_code == 400 and "不在词表" in r.json()["detail"]
+    assert client.put(f"/api/assets/{aid}", json={"add_tags": [{"dim": "weather", "value": "下雪"}]}).status_code == 200
+    f = client.get("/api/assets/facets").json()
+    assert all(v in f["vocab"][d] for d in vocab.CONTROLLED for v in f["facets"]["tags"][d])
+    assert all(len(v) <= vocab.PLACE_MAX for v in f["facets"]["tags"]["place"])
+    with SessionLocal() as db:
+        db.query(AssetTag).filter(AssetTag.asset_id == aid).delete()
+        db.query(Asset).filter(Asset.id == aid).delete()
+        db.commit()

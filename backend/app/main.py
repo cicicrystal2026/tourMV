@@ -44,6 +44,9 @@ async def lifespan(app: FastAPI):
         music_svc.recompute_model_stats(db)
         trends_svc.seed_demo(db)          # 无真实 trends.db 时提供示例素材卡
         assets_svc.seed_demo_assets(db)   # 空素材库时生成占位镜头，便于跑通全流程
+        cleaned = assets_svc.clean_tags(db)   # 存量标签按受控词表清洗（幂等）
+        if any(cleaned.values()):
+            log.info("素材标签已按受控词表清洗：%s", cleaned)
     q.start(s.api_concurrency, s.gpu_concurrency)
     # 队列起来之后再收拾「生成中」卡住的分镜（要先让队列把中断的任务重新入队）
     from .services import storyboard as storyboard_svc
