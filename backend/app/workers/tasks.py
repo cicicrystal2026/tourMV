@@ -414,7 +414,7 @@ def h_render_all(ctx: JobContext) -> None:
         if job.status == "done" and not (job.qc or {}).get("ok", True):
             bad = "、".join(c["name"] for c in job.qc.get("checks", []) if not c["ok"])
             qc_failed.append(f"{render_svc.VARIANTS[v]['label']}：{bad}")
-    ctx.set_result({"done": done, "failed": failed, "qc_failed": qc_failed})
+    result = {"done": done, "failed": failed, "qc_failed": qc_failed}
     if failed or qc_failed:
         # 合成失败或出片自检不通过：不交付，退回「待精剪」并写明原因（PRD V1.1 F3-10），
         # 而不是停在「合成中」让人以为还在跑
@@ -424,7 +424,18 @@ def h_render_all(ctx: JobContext) -> None:
             p.status, p.status_note = "edit_review", f"出片未通过：{reason}"[:300]
             ctx.db.commit()
         raise RuntimeError(f"出片未通过：failed={failed} qc={qc_failed}")
-    # 全部版本合成成功且自检通过才推进到「已交付」
+    # 全部版本合成成功且自检通过才推进到「已交付」。
+    # 顺手出封面（横版 + 竖版）：底图取第一句歌词的景区配图，标题用项目名。
+    # 封面是交付物料、不是闸门 —— 生成失败只记日志，不阻塞交付。
+    try:
+        covers = render_svc.render_covers(ctx.db, pid,
+                                          progress=lambda p: ctx.progress(p, None))
+        ok_covers = [c.variant for c in covers if c.status == "done"]
+        if ok_covers:
+            result["covers"] = ok_covers
+    except Exception as e:      # noqa: BLE001
+        log.warning("封面生成失败（不影响交付）：%s", e)
+    ctx.set_result(result)
     _advance_if(ctx.db, pid, "rendering", "delivered")
 
 
