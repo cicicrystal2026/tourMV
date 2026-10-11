@@ -7,12 +7,13 @@
 | key | 厂商 | Key 环境变量 | 说明 |
 |---|---|---|---|
 | `wanx` | 通义万相（DashScope） | `LLM_API_KEY` | 和 LLM 同一个 Key，无需另申请 |
-| `seedream` | 豆包 Seedream 4.0（火山方舟） | `ARK_API_KEY` | 写实感与中文场景理解更强，支持 2K |
+| `seedream` | 豆包 Seedream 5.0（火山方舟） | `ARK_API_KEY` | 写实感与中文场景理解更强，支持 2K |
 | `jimeng` | 即梦 AI 图片生成（火山引擎视觉智能） | `VOLC_ACCESS_KEY` + `VOLC_SECRET_KEY` | 即梦同源模型，AK/SK 签名调用 |
 
 ⚠️ 分辨率上限（实测）：万相 **宽或高必须落在 512–1440**，所以 16:9 最大只能
-`1440*810`；出图后由 `media.image_to_clip` 放大到 1920×1080（并做一次锐化补偿）。
-Seedream 支持 2K+，接上后画质会有明显提升，这也是接它的主要收益。
+`1440*810`；`media.image_to_clip` 会把它放大到 1920×1080 并做一次锐化补偿。
+Seedream 直接给 2560×1440（16:9 的 2K），落到 1920×1080 是**缩小**而非放大，
+不会再有放大带来的柔化 —— 这是接它的主要收益。
 
 两个 provider 都统一在 `text_to_image()` 里按 `provider` 分派，
 失败带退避重试（实测万相 5 张会挂 1–2 张）。
@@ -53,13 +54,18 @@ PROVIDERS: dict[str, dict] = {
     },
     "seedream": {
         "label": "豆包 Seedream",
-        # 4.0 起写实质感明显好于 3.0，并支持 2K；模型 ID 以方舟控制台「模型推理」为准，
-        # 可用 SEEDREAM_IMAGE_MODEL 覆盖（如账号里开通的是 3.0 / 4.5）
-        "model": "doubao-seedream-4-0-250828",
-        "size": "2560x1440",
+        # 5.0 flash：快、便宜、2K（pro 是 doubao-seedream-5-0-pro-260628，画质更高）。
+        # ⚠️ 5.0 的 size 只有两种写法，**不可混用**：
+        #     档位词 1K / 1.5K / 2K（默认 2K），或像素值 `宽x高`
+        #     （总像素须落在 921600~4624220、宽高比须落在 1/16~16）。
+        #   并且**没有 aspect_ratio 参数** —— 所以想要 16:9 横版配图，
+        #   必须传像素值；只传 `2K` 会拿到模型自己的默认比例（偏方）。
+        # 模型 ID 以方舟控制台「开通管理」为准，可用 SEEDREAM_IMAGE_MODEL 覆盖。
+        "model": "doubao-seedream-5-0-flash-260915",
+        "size": "2560x1440",     # 16:9，3,686,400 像素，落在官方允许区间内
         "key_attr": "ark_api_key",
         "env": "ARK_API_KEY",
-        "price_cny": 0.20,
+        "price_cny": 0.21,       # flash 官方 $0.03/张（约 ¥0.21）；以控制台刊例价为准
     },
     "jimeng": {
         "label": "即梦",
@@ -238,30 +244,65 @@ def _wanx(prompt: str, out_path: Path, *, size: str, negative: str,
 
 
 # ------------------------------------------------------------ Seedream（同步）
+def _seedream_gen(model: str) -> int:
+    """从模型 ID 取主版本号：doubao-seedream-5-0-flash-260915 → 5。
+
+    用来决定「哪些参数能传」——各家版本支持面不一样，多传一个就 400。
+    """
+    import re
+
+    m = re.search(r"seedream-(\d+)", model or "")
+    return int(m.group(1)) if m else 4
+
+
 def _seedream(prompt: str, out_path: Path, *, size: str, timeout_s: int) -> None:
     """火山方舟 Seedream，同步返回（url 或 b64_json）。
 
-    注：**未拿到 Key 前无法实测**，字段按官方文档写。
-    真接上后若报参数错误，优先核对 `SEEDREAM_IMAGE_MODEL`（须是账号已开通的模型 ID）
-    与尺寸（4.0 用 `2560x1440` 这种 x 分隔；3.0 只支持固定几档，如 `1280x720`）。
+    版本差异（官方文档口径，很容易踩）：
+    - **`sequential_image_generation`（组图）**：仅 **4.x** 支持。3.x 没有，
+      **5.0 pro / flash 官方明确不支持，传了直接 400**。所以按主版本号精确传。
+    - **`stream`（流式）**：5.0 同样不支持，不要带。
+    - **`watermark`**：接口默认 **true**，必须显式设 false 才有干净图。
+    - **`size`**：5.0 只有「档位词 1K/1.5K/2K」或「像素值 宽x高」两种写法且不可混用；
+      **没有 aspect_ratio 参数**，要 16:9 就得传像素值。
     """
     base = os.environ.get(
         "ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/")
+    url = f"{base}/images/generations"
     headers = {
         "Authorization": f"Bearer {_key('seedream')}",
         "Content-Type": "application/json",
     }
-    body = {
-        "model": model_name("seedream"),
+    model = model_name("seedream")
+    body: dict = {
+        "model": model,
         "prompt": prompt[:1500],
         "size": size,
         "response_format": "url",
-        "watermark": False,
+        "watermark": False,          # 默认是 true，不关会带水印
     }
-    if "seedream-3" not in body["model"]:
-        body["sequential_image_generation"] = "disabled"   # 4.x：只要一张
-    r = requests.post(f"{base}/images/generations", headers=headers, json=body,
-                      timeout=max(120, min(timeout_s, 600)))
+    if _seedream_gen(model) == 4:
+        body["sequential_image_generation"] = "disabled"   # 只要一张
+
+    timeout = max(120, min(timeout_s, 600))
+    r = requests.post(url, headers=headers, json=body, timeout=timeout)
+
+    # 参数类 400：逐个剥掉可选参数再试 —— 「多带一个参数就整张图出不来」
+    # 在跨版本时太常见，不值得让人手工排查。
+    if r.status_code == 400:
+        first_err = r.text[:300]
+        retried = False
+        for drop in ("sequential_image_generation", "watermark"):
+            if drop not in body:
+                continue
+            slim = {k: v for k, v in body.items() if k != drop}
+            r2 = requests.post(url, headers=headers, json=slim, timeout=timeout)
+            if r2.status_code < 400:
+                r, retried = r2, True
+                break
+        if not retried:
+            raise RuntimeError(f"Seedream HTTP 400（参数不被接受）：{first_err}")
+
     if r.status_code >= 400:
         raise RuntimeError(f"Seedream 失败 HTTP {r.status_code}: {r.text[:300]}")
     data = (r.json() or {}).get("data") or []
@@ -271,10 +312,10 @@ def _seedream(prompt: str, out_path: Path, *, size: str, timeout_s: int) -> None
     if item.get("b64_json"):
         out_path.write_bytes(base64.b64decode(item["b64_json"]))
         return
-    url = item.get("url")
-    if not url:
+    url_img = item.get("url")
+    if not url_img:
         raise RuntimeError(f"Seedream 未返回 url：{str(item)[:200]}")
-    _fetch(url, out_path)
+    _fetch(url_img, out_path)
 
 
 # ------------------------------------------------------------ 即梦（火山引擎视觉智能，异步）
