@@ -146,7 +146,9 @@ def _self_contradictory(text: str, evidence: str) -> bool:
     return False
 
 
-def run_checks(db: Session, ver: LyricVersion, real: bool = True) -> list[LyricCheck]:
+def run_checks(db: Session, ver: LyricVersion, real: bool = True,
+               only: set[str] | None = None) -> list[LyricCheck]:
+    """跑自动检查。only 给定时只保留这些句子（归一化文本）上的疑点 —— 用于「只查改动的句子」。"""
     proj = db.get(Project, ver.project_id)
     destination = proj.destination if proj else ""
     lines = {(n, i): ln for n, i, ln in flat_lines(ver.sections)}
@@ -155,7 +157,7 @@ def run_checks(db: Session, ver: LyricVersion, real: bool = True) -> list[LyricC
     # 1) 字数：规则计算，不交给 LLM
     meter = [{"id": k, "section": n, "line_no": i, "text": ln}
              for k, (n, i, ln) in enumerate(flat_lines(ver.sections))
-             if not MIN_LEN <= clean_len(ln) <= MAX_LEN]
+             if not MIN_LEN <= clean_len(ln) <= MAX_LEN and (only is None or _norm_line(ln) in only)]
     if meter:
         pay, _ = llm.json_chat(prompts.meter_fix_messages(meter, destination), fallback={"items": []},
                                purpose="lyrics_meter_fix", project_id=ver.project_id)
@@ -216,11 +218,17 @@ def run_checks(db: Session, ver: LyricVersion, real: bool = True) -> list[LyricC
             continue
         seen[k] = it
         uniq.append(it)
+    if only is not None:
+        uniq = [it for it in uniq if _norm_line(it["text"]) in only]
     for it in uniq:
         if it.get("_also"):
             it["evidence"] = (f"{it['evidence']}（同一句还出现在 {'、'.join(it.pop('_also'))}，"
                               "处理一次全部生效）")
 
+    # 同一版本重跑（点「重新检查」）时，人已经写过理由保留的决定不能被冲掉
+    kept_before = {(c.type, _norm_line(c.text)): c.keep_reason
+                   for c in db.query(LyricCheck).filter(LyricCheck.lyric_version_id == ver.id)
+                   if c.status in ("kept", "resolved")}
     db.query(LyricCheck).filter(LyricCheck.lyric_version_id == ver.id).delete()
     rows: list[LyricCheck] = []
     for it in uniq:
@@ -241,6 +249,9 @@ def run_checks(db: Session, ver: LyricVersion, real: bool = True) -> list[LyricC
             status="pending", evidence=evidence, suggestions=it["suggestions"],
             needs_manual=is_fact and not cited, kb_entry_ids=cited,
         )
+        prior = kept_before.get((row.type, _norm_line(row.text)))
+        if prior is not None:
+            row.status, row.keep_reason = "kept", prior or "沿用此前的保留决定"
         db.add(row)
         rows.append(row)
     ver.checks_done = True
@@ -278,7 +289,14 @@ def check_summary(rows: list[LyricCheck], ver: LyricVersion | None = None) -> di
 
 # ------------------------------------------------------------------ 编辑
 def save_version(db: Session, project_id: str, sections: list[dict], source: str = "manual",
-                 carry_from: LyricVersion | None = None) -> LyricVersion:
+                 carry_from: LyricVersion | None = None,
+                 trusted: list[str] | None = None) -> LyricVersion:
+    """保存为新版本并检查。
+
+    carry_from 给定（由上一版改动而来：采纳建议、手动编辑、重写选中行、回滚）时走增量检查：
+    只查改动的句子，没动的句子原样沿用上一版的检查结果。
+    trusted：不需要再查的句子（采纳系统自己给的改写建议得到的句子）。
+    """
     _editable(db, project_id)
     prev = latest(db, project_id)
     ver = LyricVersion(project_id=project_id, version=(prev.version + 1) if prev else 1,
@@ -286,10 +304,41 @@ def save_version(db: Session, project_id: str, sections: list[dict], source: str
     db.add(ver)
     db.commit()
     db.refresh(ver)
-    run_checks(db, ver)
     if carry_from is not None:
-        _carry_decisions(db, carry_from, ver)
+        _incremental_checks(db, carry_from, ver, trusted or [])
+    else:
+        run_checks(db, ver)
     return ver
+
+
+def _incremental_checks(db: Session, prev: LyricVersion, ver: LyricVersion, trusted: list[str]) -> None:
+    """增量检查：只查相对上一版改动过的句子，其余沿用上一版结果。
+
+    V1.0 每次采纳或保存都把整首歌重新交给模型检查，而模型每次给的结果不一样，
+    没动过、甚至已经确认过的句子会冒出新疑点 —— 处理一条冒一条（实测一首歌被逼到第 26 版）。
+    另外，采纳系统自己给的改写建议后，这句不再回头复查（否则系统会质疑自己的建议，同样没完没了）。
+    """
+    prev_lines = {_norm_line(ln) for _n, _i, ln in flat_lines(prev.sections)}
+    cur = flat_lines(ver.sections)
+    where = {}
+    for n, i, ln in cur:
+        where.setdefault(_norm_line(ln), (n, i))
+    skip = {_norm_line(t) for t in trusted}
+    changed = {k for k in where if k not in prev_lines and k not in skip}
+
+    if changed:
+        run_checks(db, ver, only=changed)        # 只留改动句上的疑点
+    for c in checks_of(db, prev.id):
+        key = _norm_line(c.text)
+        if key not in where or c.status == "adopted":
+            continue                             # 这句已经被改掉了
+        sec, no = where[key]
+        db.add(LyricCheck(
+            lyric_version_id=ver.id, project_id=ver.project_id, type=c.type, section=sec, line_no=no,
+            text=c.text, status=c.status, evidence=c.evidence, suggestions=c.suggestions,
+            keep_reason=c.keep_reason, needs_manual=c.needs_manual, kb_entry_ids=c.kb_entry_ids))
+    ver.checks_done = True
+    db.commit()
 
 
 def _carry_decisions(db: Session, old: LyricVersion, new: LyricVersion, prefix: str = "") -> int:
@@ -368,7 +417,7 @@ def adopt_suggestion(db: Session, check_id: str, index: int = 0) -> LyricVersion
         sections.append({"name": s.get("name"), "lines": lines})
     c.status = "adopted"
     db.commit()
-    return save_version(db, ver.project_id, sections, source="manual", carry_from=ver)
+    return save_version(db, ver.project_id, sections, source="manual", carry_from=ver, trusted=[new_text])
 
 
 def _norm_line(text: str) -> str:
@@ -421,7 +470,8 @@ def rollback(db: Session, project_id: str, version: int) -> LyricVersion:
     ).scalar_one_or_none()
     if src is None:
         raise ProjectError(f"版本 v{version} 不存在")
-    return save_version(db, project_id, src.sections, source="manual")
+    # 回滚的版本内容与 src 完全相同：直接沿用它当时的检查结果，不重新查
+    return save_version(db, project_id, src.sections, source="manual", carry_from=src)
 
 
 def all_lines(ver: LyricVersion) -> list[str]:

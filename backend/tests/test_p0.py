@@ -984,3 +984,53 @@ def test_only_fact_checks_block(client, has_real_db):
             db.query(t).filter(t.project_id == pid).delete()
         db.query(Project).filter(Project.id == pid).delete()
         db.commit()
+
+
+def test_incremental_checks_no_whack_a_mole(client, has_real_db, monkeypatch):
+    """改一句只查这一句：没动的句子沿用上一版结果，采纳的建议不回头复查（修复「处理一条冒一条」）。"""
+    from app.db import SessionLocal
+    from app.models import LyricCheck, LyricVersion, Project
+    from app.services import lyrics as L
+
+    calls = {"n": 0}
+
+    def noisy(messages, **kw):
+        """模拟不稳定的模型：每次都对所有句子报史实疑点。"""
+        calls["n"] += 1
+        body = messages[-1]["content"]
+        issues = [{"type": "fact", "section": "主歌1", "line_no": i, "text": "", "evidence": f"第{calls['n']}次觉得可疑",
+                   "suggestions": ["这是系统给出的改写句子"]} for i in (1, 2, 3) if f"{i}. " in body]
+        return {"issues": issues, "items": []}, True
+    monkeypatch.setattr(L.llm, "json_chat", noisy)
+
+    with SessionLocal() as db:
+        p = Project(name="测试·增量检查", destination="x", status="lyric_review")
+        db.add(p)
+        db.commit()
+        pid = p.id
+        v1 = L.save_version(db, pid, [{"name": "主歌1", "lines": ["第一句歌词写在这里", "第二句歌词写在这里", "第三句歌词写在这里"]}])
+        rows = L.checks_of(db, v1.id)
+        assert len(rows) == 3 and calls["n"] == 1
+        L.keep_original(db, rows[0].id, "已查证")
+        L.keep_original(db, rows[1].id, "已查证")
+
+        # 采纳第三条的建议：不再调模型，前两条的保留决定原样带过来，新句子不被复查
+        v2 = L.adopt_suggestion(db, rows[2].id, 0)
+        r2 = L.checks_of(db, v2.id)
+        assert calls["n"] == 1, "采纳建议后不应再整首重查"
+        assert sorted((c.text, c.status) for c in r2) == [("第一句歌词写在这里", "kept"), ("第二句歌词写在这里", "kept")]
+
+        # 手动改第二句：只查这一句（模型虽然对三句都报，但只留改动句的）
+        v3 = L.save_version(db, pid, [{"name": "主歌1", "lines": ["第一句歌词写在这里", "手动改过的第二句话", "这是系统给出的改写句子"]}],
+                            carry_from=v2)
+        r3 = {c.text: c.status for c in L.checks_of(db, v3.id)}
+        assert r3 == {"第一句歌词写在这里": "kept", "手动改过的第二句话": "pending"} and calls["n"] == 2
+
+        # 同一版本「重新检查」：已保留的决定不被冲掉
+        L.run_checks(db, v3)
+        assert {c.text: c.status for c in L.checks_of(db, v3.id)}["第一句歌词写在这里"] == "kept"
+
+        for t in (LyricCheck, LyricVersion):
+            db.query(t).filter(t.project_id == pid).delete()
+        db.query(Project).filter(Project.id == pid).delete()
+        db.commit()
