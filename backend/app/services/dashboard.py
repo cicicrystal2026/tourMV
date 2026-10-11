@@ -33,7 +33,7 @@ def summary(db: Session) -> dict:
     renders = list(db.execute(select(RenderJob).where(RenderJob.status == "done")).scalars())
     recent = [r for r in renders if (r.updated_at or r.created_at) >= week_start]
     landscape = len([r for r in recent if r.variant in ("landscape", "clean", "sub_zh", "sub_zh_en")])
-    portrait = len([r for r in recent if r.variant in ("portrait", "short")])
+    portrait = len([r for r in recent if r.variant in ("portrait", "short", "highlight30", "essence60")])
 
     ast = assets_svc.stats(db)
 

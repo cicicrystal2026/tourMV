@@ -1034,3 +1034,33 @@ def test_incremental_checks_no_whack_a_mole(client, has_real_db, monkeypatch):
             db.query(t).filter(t.project_id == pid).delete()
         db.query(Project).filter(Project.id == pid).delete()
         db.commit()
+
+
+def test_short_video_cut_windows():
+    """高光 30 秒从副歌起、前 3 秒有人声；精华 60 秒以副歌结束为终点；结尾都落在句末。"""
+    from types import SimpleNamespace
+
+    from app.services import render as R
+
+    def L(sec, s, e):
+        return {"section": sec, "start_s": s, "end_s": e, "text": "x"}
+    lines = ([L("主歌1", 1.5 + 7 * i, 8.0 + 7 * i) for i in range(4)]            # 1.5–29
+             + [L("预副歌", 30 + 5 * i, 34.5 + 5 * i) for i in range(2)]         # 30–39.5
+             + [L("副歌", 41 + 7 * i, 47.5 + 7 * i) for i in range(4)]           # 41–68.5
+             + [L("主歌2", 72 + 7 * i, 78.5 + 7 * i) for i in range(4)]
+             + [L("尾副歌", 110 + 7 * i, 116.5 + 7 * i) for i in range(4)])
+    tl = SimpleNamespace(duration_s=160.0, lyric_lines=lines)
+
+    off, span = R.cut_window(tl, 30)
+    assert abs(off - (41 - R.CUT_LEAD_S)) < 0.01                    # 从第一段副歌起，人声 0.8 秒处进
+    assert abs(span - 30) <= R.CUT_TOLERANCE_S + 0.5
+    assert any(abs(off + span - 0.4 - l["end_s"]) < 0.01 for l in lines)      # 结尾落在句末
+
+    off, span = R.cut_window(tl, 60)
+    assert off < 41 and abs(off + span - 0.4 - 68.5) < 0.01          # 以第一段副歌结束（68.5）为终点
+    assert abs(span - 60) <= R.CUT_TOLERANCE_S + 0.5
+    assert any(abs(off + R.CUT_LEAD_S - l["start_s"]) < 0.01 for l in lines) or off == 0.0
+
+    short_song = SimpleNamespace(duration_s=25.0, lyric_lines=lines[:3])
+    assert R.cut_window(short_song, 30) == (0.0, 25.0)               # 歌比目标短：用整首
+    assert set(R.VARIANTS) >= {"highlight30", "essence60"}

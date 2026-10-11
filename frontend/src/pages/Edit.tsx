@@ -25,7 +25,7 @@ export default function EditPage() {
   // 默认全选「带字幕」的版本 —— 文旅 MV 主交付物必须有歌词。
   // （无字幕的 clean 版留给二剪，默认不勾。）
   const [variants, setVariants] = useState<string[]>(
-    ['landscape', 'portrait', 'sub_zh_en', 'short'],
+    ['landscape', 'portrait', 'sub_zh_en', 'short', 'highlight30', 'essence60'],
   )
   // 可选版本列表以接口为准（后端是单一来源），接口没回来时用本地兜底
   // （兜底里刻意不含历史 key sub_zh —— 它和现在的 landscape 等价，不该出现在勾选项里）
@@ -35,6 +35,8 @@ export default function EditPage() {
       { key: 'portrait', label: VARIANT_LABEL.portrait, subs: 'zh' },
       { key: 'sub_zh_en', label: VARIANT_LABEL.sub_zh_en, subs: 'zh_en' },
       { key: 'short', label: VARIANT_LABEL.short, subs: 'zh_en' },
+      { key: 'highlight30', label: VARIANT_LABEL.highlight30, subs: 'zh' },
+      { key: 'essence60', label: VARIANT_LABEL.essence60, subs: 'zh' },
       { key: 'clean', label: VARIANT_LABEL.clean, subs: null },
     ],
   )

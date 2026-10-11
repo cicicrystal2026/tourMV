@@ -28,7 +28,18 @@ VARIANTS = {
     "short": {"label": "短版竖屏 2:30–2:50 · 中英字幕", "w": 1080, "h": 1920,
               "subs": "zh_en", "short": True},
     "clean": {"label": "横版 1920×1080 · 无字幕（供二次剪辑）", "w": 1920, "h": 1080, "subs": None},
+    # 短视频平台用的切片（抖音 / 视频号 / 小红书 / Shorts）：整首 2–3 分钟在这些平台完播率很低。
+    # cut = 目标秒数；截取规则见 cut_window()
+    "highlight30": {"label": "高光版竖屏 30 秒 · 中文字幕", "w": 1080, "h": 1920, "subs": "zh",
+                    "short": True, "cut": 30},
+    "essence60": {"label": "精华版竖屏 60 秒 · 中文字幕", "w": 1080, "h": 1920, "subs": "zh",
+                  "short": True, "cut": 60},
 }
+
+# 切片时长允许的偏差：结尾要落在一句歌词的末尾，不把一句话切一半
+CUT_TOLERANCE_S = 4.0
+# 切片开头留给人声入场的时间（必须 < 3 秒：短视频前 3 秒决定去留）
+CUT_LEAD_S = 0.8
 
 # F3-7 内部评审预览：不是交付物，不进成片列表、不参与交付闸门；
 # 720p + ultrafast，3 分钟片要求 2 分钟内导出
@@ -222,6 +233,44 @@ def short_window(tl: Timeline) -> tuple[float, float]:
     return round(start, 3), round(span, 3)
 
 
+def cut_window(tl: Timeline, target: float) -> tuple[float, float]:
+    """短视频切片的截取窗口 (起点, 时长)。
+
+    - 30 秒高光：从第一段副歌起（最抓人的一段），提前 CUT_LEAD_S 入画；
+    - 60 秒精华：以第一段副歌结束为终点往前取 60 秒（主歌 + 副歌），起点落在某句歌词开头。
+    两者的结尾都落在最接近目标时长的那句歌词末尾（±CUT_TOLERANCE_S 内），不把一句话切一半；
+    找不到合适的句尾就按目标时长硬切（音频有淡出）。整首歌比目标还短时用整首。
+    """
+    dur = float(tl.duration_s or 0)
+    lines = [l for l in (tl.lyric_lines or []) if float(l.get("end_s", 0)) > float(l.get("start_s", 0))]
+    if dur <= target + 1 or not lines:
+        return 0.0, round(dur, 3)
+    chorus = [l for l in lines if "副歌" in (l.get("section") or "") and "预" not in (l.get("section") or "")]
+    first = chorus[0] if chorus else lines[0]
+    c_start = float(first["start_s"])
+    # 第一段副歌的结束：从 first 起连续同段落的最后一句
+    c_end = float(first["end_s"])
+    for l in lines[lines.index(first):]:
+        if (l.get("section") or "") != (first.get("section") or ""):
+            break
+        c_end = float(l["end_s"])
+
+    if target <= 40:
+        start = max(0.0, c_start - CUT_LEAD_S)
+    else:
+        want = max(0.0, c_end - target)
+        # 起点落在不晚于 want 的最近一句开头，再留一点入场时间；歌不够长就从头
+        starts = [float(l["start_s"]) for l in lines if float(l["start_s"]) <= want + 2.0]
+        start = max(0.0, (max(starts) if starts else 0.0) - CUT_LEAD_S)
+    start = min(start, max(0.0, dur - target))
+
+    ends = [float(l["end_s"]) for l in lines
+            if abs(float(l["end_s"]) - (start + target)) <= CUT_TOLERANCE_S and float(l["end_s"]) <= dur]
+    end = min(ends, key=lambda e: abs(e - (start + target))) + 0.4 if ends else start + target
+    end = min(end, dur)
+    return round(start, 3), round(end - start, 3)
+
+
 def _has_ai_shots(db: Session, tl: Timeline) -> bool:
     ids = {c.asset_id for c in db.execute(
         select(TimelineClip).where(TimelineClip.timeline_id == tl.id)).scalars() if c.asset_id}
@@ -231,12 +280,12 @@ def _has_ai_shots(db: Session, tl: Timeline) -> bool:
                for a in db.execute(select(Asset).where(Asset.id.in_(ids))).scalars())
 
 
-def _ai_card_filter(span: float, w: int, h: int) -> str:
+def _ai_card_filter(span: float, w: int, h: int, secs: float = AI_CARD_SECONDS) -> str:
     """片尾 AI 字卡。字号按画面短边算、中英分两行 ——
     最初按高度算字号，竖版上整行被裁掉两头（自测抽帧发现，自检本身看不出来）。"""
     font = media.cjk_fontfile()
     fontarg = f"fontfile='{esc_filter_path(font)}':" if font else ""
-    t0 = max(0.0, span - AI_CARD_SECONDS)
+    t0 = max(0.0, span - secs)
     base = min(w, h)
     fz, fe = int(base * 0.055), int(base * 0.032)
     on = f"enable='gte(t,{t0:.2f})'"
@@ -268,7 +317,13 @@ def quality_check(job: RenderJob, cfg: dict, *, expect_s: float, short: bool,
         checks.append({"name": name, "ok": bool(ok), "detail": detail})
 
     d = float(info.get("duration_s") or 0)
-    if short:
+    if cfg.get("cut"):
+        tgt = float(cfg["cut"])
+        whole = expect_s < tgt - CUT_TOLERANCE_S      # 整首歌比目标还短
+        add("时长", abs(d - expect_s) <= 1.0 and (whole or abs(d - tgt) <= CUT_TOLERANCE_S + 1.0),
+            f"{d:.1f} 秒（目标 {int(tgt)} 秒，结尾落在句末，允许 ±{int(CUT_TOLERANCE_S)} 秒）"
+            + ("；整首歌比目标时长短，已用整首" if whole else ""))
+    elif short:
         lo, hi = (SHORT_MIN_S, SHORT_MAX_S) if expect_s >= SHORT_MIN_S else (expect_s - 1.5, expect_s + 1.5)
         add("时长", lo - 0.5 <= d <= hi + 0.5,
             f"{d:.1f} 秒（短版要求 {int(SHORT_MIN_S)}–{int(SHORT_MAX_S)} 秒）"
@@ -392,7 +447,9 @@ def render_variant(db: Session, project_id: str, variant: str, progress=None) ->
             raise ProjectError("时间线里没有可用的镜头")
 
         offset = 0.0
-        if cfg.get("short"):
+        if cfg.get("cut"):
+            offset, span = cut_window(tl, float(cfg["cut"]))
+        elif cfg.get("short"):
             offset, span = short_window(tl)
         else:
             span = float(tl.duration_s or 0)
@@ -403,9 +460,22 @@ def render_variant(db: Session, project_id: str, variant: str, progress=None) ->
         # 阶段一：规整片段
         segs: list[Path] = []
         cursor = 0.0
+        skipped = 0.0          # 窗口之前整段跳过的时长（切片不必把前面几十秒都规整一遍）
         for i, (src, in_s, out_s, want_s) in enumerate(sources):
             if cfg.get("short") and cursor >= offset + span:
                 break
+            if cfg.get("short") and cursor + want_s <= offset:
+                cursor += want_s
+                skipped += want_s
+                continue
+            if cfg.get("short") and cursor < offset:
+                # 这个镜头跨在窗口起点上：规整时就把窗口之前的部分裁掉，拼接后不再做跳转。
+                # （对拼接流做 -ss 跳转不精确，实测画面比声音晚 0.8 秒，被出片自检抓到）
+                head = offset - cursor
+                in_s = in_s + (out_s - in_s) * (head / want_s)
+                want_s -= head
+                cursor += head
+                skipped += head
             seg_out = work / f"seg_{i:03d}.mp4"
             _normalize(src, seg_out, in_s, out_s, cfg["w"], cfg["h"], want_s, fast=fast)
             segs.append(seg_out)
@@ -428,8 +498,8 @@ def render_variant(db: Session, project_id: str, variant: str, progress=None) ->
         out = settings().data_dir / "renders" / f"{stem}.mp4"
         # 画面与音频必须从同一个起点截：短版两路输入都 -ss 到窗口起点（V1.0 只截了音频）
         cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
-        if offset > 0:
-            cmd += ["-ss", f"{offset:.3f}"]
+        if offset - skipped > 0.001:
+            cmd += ["-ss", f"{offset - skipped:.3f}"]
         cmd += ["-f", "concat", "-safe", "0", "-i", str(concat_list)]
 
         audio = Path(tl.audio_path) if tl.audio_path else None
@@ -448,13 +518,18 @@ def render_variant(db: Session, project_id: str, variant: str, progress=None) ->
             vf = f"subtitles=filename='{esc_filter_path(ass)}'"
             sub_lines = len(lines)
         if want_card:
-            vf = (vf + "," if vf else "") + _ai_card_filter(span, cfg["w"], cfg["h"])
+            card_s = 2.0 if cfg.get("cut") else AI_CARD_SECONDS      # 短切片里字卡缩短
+            vf = (vf + "," if vf else "") + _ai_card_filter(span, cfg["w"], cfg["h"], card_s)
 
         if vf:
             cmd += ["-vf", vf]
         cmd += ["-map", "0:v"]
         if has_audio:
             cmd += ["-map", "1:a", "-c:a", "aac", "-b:a", "192k"]
+            if cfg.get("cut"):
+                # 切片从歌曲中间截出来：开头短淡入、结尾 1.2 秒淡出，避免硬切的突兀
+                fi = "afade=t=in:st=0:d=0.25," if offset > 0.01 else ""
+                cmd += ["-af", f"{fi}afade=t=out:st={max(0.0, span - 1.2):.3f}:d=1.2"]
         # CRF 26 是发布档：实测 1080p25 的缓动镜头约 1.1 Mbps，
         # 与 CRF 22（1.8 Mbps）肉眼无差，但体积小 40% ——
         # 一条 3 分钟的片子 5 个版本，差额是 80MB 级，直接决定能不能发布出去。

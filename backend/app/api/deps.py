@@ -18,6 +18,10 @@ def guard_locked(request: Request, db: Session = Depends(get_db)) -> None:
     pid = request.path_params.get("project_id")
     if not pid:
         return
+    # 补出成片版本 / 导出预览不改动项目内容（歌词、镜头、时间线都不变），已交付项目也允许：
+    # 交付后想加一个 30 秒竖屏切片，不该逼人新建修订版
+    if request.url.path.endswith(("/render", "/preview")):
+        return
     p = db.get(Project, pid)
     if p is not None and p.locked_at is not None:
         raise HTTPException(status_code=400, detail="项目已交付并锁定，只读；如需修改请「新建修订版」")

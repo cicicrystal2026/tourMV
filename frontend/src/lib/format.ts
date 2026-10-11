@@ -60,6 +60,8 @@ export const VARIANT_LABEL: Record<string, string> = {
   portrait: '竖版 1080×1920 · 中文字幕',
   sub_zh_en: '横版 1920×1080 · 中英字幕',
   short: '短版竖屏 2:30–2:50 · 中英字幕',
+  highlight30: '高光版竖屏 30 秒 · 中文字幕',
+  essence60: '精华版竖屏 60 秒 · 中文字幕',
   clean: '横版 1920×1080 · 无字幕（供二次剪辑）',
   // 历史版本：sub_zh 当年就是「横版 + 中文字幕」，等价于现在的 landscape
   sub_zh: '横版 1920×1080 · 中文字幕（旧版）',
