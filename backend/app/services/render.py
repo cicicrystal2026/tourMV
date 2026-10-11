@@ -96,12 +96,23 @@ def _ts(sec: float) -> str:
 
 def build_ass(lines: list[dict], english: list[str] | None, w: int, h: int,
               offset_s: float = 0.0) -> str:
-    """lines: [{text, start_s, end_s}]；english 与之等长。"""
+    """lines: [{text, start_s, end_s}]；english 与之等长。
+
+    字号按画面**短边**的比例算（见 `SUB_FONT_SCALE_ZH/EN`）：竖版与横版的短边
+    都是 1080，所以两者字号一致、观感一致。默认 0.062 ≈ 67px @1080p。
+    """
+    _s = settings()
     base = min(w, h)
-    fs_zh = max(24, int(base * 0.045))
-    fs_en = max(18, int(base * 0.030))
-    margin_zh = int(h * 0.10) if w >= h else int(h * 0.22)
-    margin_en = margin_zh - int(fs_zh * 1.35)
+    fs_zh = max(24, int(base * _s.sub_font_scale_zh))
+    fs_en = max(18, int(base * _s.sub_font_scale_en))
+    # 底部安全边距以**最下面那一行**为准：有英文时英文在最下、中文上移到英文行高之上；
+    # 只有中文时中文自己贴安全边距。
+    # 原实现是「中文位置固定 + 英文按 fz_zh 反推」，字号调大后会把英文挤到画面底边
+    # （实测中文 66px 时英文距底只剩 19px）。
+    has_en = bool(english and any((e or "").strip() for e in english))
+    margin_base = int(h * 0.10) if w >= h else int(h * 0.22)
+    margin_en = margin_base
+    margin_zh = (margin_base + int(fs_en * 1.5)) if has_en else margin_base
     font = _font_name()
     head = f"""[Script Info]
 ScriptType: v4.00+
@@ -589,6 +600,182 @@ def render_variant(db: Session, project_id: str, variant: str, progress=None) ->
 
     db.refresh(job)
     return job
+
+
+# ------------------------------------------------------------------ 封面
+# 标题用内置的得意黑（Smiley Sans，SIL OFL-1.1，可免费商用）——
+# 文旅是商用投放，字体版权和素材版权一样不能含糊。字体与官方许可见
+# backend/app/assets/fonts/（底下有 OFL.txt）。
+COVER_FONT = (Path(__file__).resolve().parent.parent
+              / "assets" / "fonts" / "SmileySans-Oblique.ttf")
+
+COVERS = {
+    "cover": {"label": "横版封面 1920×1080", "w": 1920, "h": 1080},
+    "cover_portrait": {"label": "竖版封面 1080×1920", "w": 1080, "h": 1920},
+}
+
+
+def _cover_font() -> str | None:
+    """封面字体：优先内置得意黑，取不到则退回系统 CJK 字体。"""
+    if COVER_FONT.exists():
+        return str(COVER_FONT)
+    for cand in CJK_FONTS:
+        if Path(cand).exists():
+            return cand
+    return None
+
+
+def _dt_escape(s: str) -> str:
+    """drawtext 的 text 参数转义。
+
+    ffmpeg 滤镜串里 `:` 是选项分隔符、`'` 是引号、`\\` 是转义符，都必须处理；
+    `%` 只在开启 expansion 时特殊，本模块统一传 expansion=none，但仍一并转义以防万一。
+    """
+    return (s.replace("\\", r"\\").replace(":", r"\:")
+             .replace("'", r"\'").replace("%", r"\%"))
+
+
+def make_cover(bg: str | Path, out: str | Path, *, title: str, subtitle: str = "",
+               w: int = 1920, h: int = 1080) -> Path:
+    """把「景点名 + 英文」压在底图上生成封面。
+
+    为什么用 ffmpeg 而不是 Pillow：Pillow 只列在 requirements-optional 里，
+    线上沙箱不保证装；ffmpeg 是项目强依赖，本地与线上行为一致。
+
+    标题字号按画面高度定（约 8.8%），但会被「不超过画宽 84%」压住 ——
+    否则「长白山·雪原」这类 6~7 字的标题在竖版（1080 宽）上会顶到画面边。
+    """
+    bg, out = Path(bg), Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    font = _cover_font()
+    farg = f"fontfile='{esc_filter_path(font)}':" if font else ""
+
+    title = (title or "").strip()
+    fs_title = max(28, min(int(h * 0.088), int(w * 0.84 / max(1, len(title)))))
+    y_title = int(h * 0.58)
+    parts = [
+        f"scale={w}:{h}:force_original_aspect_ratio=increase",
+        f"crop={w}:{h}",
+        # 统一轻微降亮：雪原/湖面这类亮底图上，不压暗白字会糊在背景里
+        "eq=brightness=-0.10:saturation=1.04",
+        f"drawtext={farg}expansion=none:text='{_dt_escape(title)}':"
+        f"fontcolor=white:fontsize={fs_title}:x=(w-text_w)/2:y={y_title}:"
+        f"borderw=3:bordercolor=black@0.35:"
+        f"shadowcolor=black@0.55:shadowx=0:shadowy=4",
+    ]
+    sub = (subtitle or "").strip()
+    if sub:
+        # 西文字宽约为字号的 0.55，同样限制不超过画宽 80%
+        fs_en = max(16, min(int(h * 0.030), int(w * 0.80 / max(1, len(sub) * 0.55))))
+        y_en = y_title + int(fs_title * 1.30)
+        parts.append(
+            f"drawtext={farg}expansion=none:text='{_dt_escape(sub)}':"
+            f"fontcolor=white@0.92:fontsize={fs_en}:x=(w-text_w)/2:y={y_en}:"
+            f"borderw=2:bordercolor=black@0.30:"
+            f"shadowcolor=black@0.5:shadowx=0:shadowy=2"
+        )
+    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(bg),
+                    "-vf", ",".join(parts), "-frames:v", "1", "-q:v", "2", str(out)],
+                   capture_output=True, timeout=180, check=True)
+    return out
+
+
+def _cover_base(db: Session, project_id: str) -> Path | None:
+    """封面底图：优先「第一句歌词的景区配图」（已过人工审核），退回成片抽帧。"""
+    from ..models import StoryboardShot
+
+    shot = db.execute(
+        select(StoryboardShot).where(StoryboardShot.project_id == project_id)
+        .order_by(StoryboardShot.order)).scalars().first()
+    if shot is not None and shot.image_path and Path(shot.image_path).exists():
+        return Path(shot.image_path)
+
+    # 没有分镜配图（早期项目）时退回成片抽帧：任取一个已完成的**视频**版本即可 ——
+    # 早年的成片 key 是 sub_zh，不一定是 landscape；用 .mp4 过滤天然排除封面自己。
+    done = db.execute(
+        select(RenderJob).where(RenderJob.project_id == project_id,
+                                RenderJob.status == "done",
+                                RenderJob.output_path.like("%.mp4"))
+        .order_by(RenderJob.created_at.desc())).scalars().first()
+    if done is not None and done.output_path and Path(done.output_path).exists():
+        return Path(done.output_path)      # 是视频也没关系，之后取第 2 秒一帧
+    return None
+
+
+def render_covers(db: Session, project_id: str, progress=None) -> list[RenderJob]:
+    """生成横版 + 竖版封面，各写一条 render_job（variant=cover / cover_portrait）。
+
+    底图取第一句歌词的景区配图；那是整首歌的第一印象，也过了人工审核。
+    英文副标题由项目名机器翻译，翻不出来就只出中文标题（不阻塞）。
+    """
+    p = get_project(db, project_id)
+    tl = db.execute(select(Timeline).where(Timeline.project_id == project_id)).scalar_one_or_none()
+    ver = tl.auto_version if tl else 1
+
+    base = _cover_base(db, project_id)
+    if base is None:
+        return []
+
+    subtitle = ""
+    try:
+        en = _translate([p.name], project_id)
+        subtitle = (en[0] if en else "").strip()
+    except Exception:      # noqa: BLE001 - 翻译失败不该挡住封面
+        subtitle = ""
+
+    jobs: list[RenderJob] = []
+    for i, (key, cfg) in enumerate(COVERS.items()):
+        if progress:
+            progress(98 + i * 2)
+        stem = f"{p.name[:20]}_{key}_v{ver}"
+        out = settings().data_dir / "renders" / f"{stem}.jpg"
+        try:
+            if base.suffix.lower() in (".mp4", ".mov", ".mkv", ".webm"):
+                # 底图是成片时先抽一帧（取第 2 秒，避开可能的片头字卡）
+                frame = out.with_name(f"{stem}_frame.jpg")
+                subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                                "-ss", "2", "-i", str(base), "-frames:v", "1", str(frame)],
+                               capture_output=True, timeout=120, check=True)
+                make_cover(frame, out, title=p.name, subtitle=subtitle,
+                           w=cfg["w"], h=cfg["h"])
+                frame.unlink(missing_ok=True)
+            else:
+                make_cover(base, out, title=p.name, subtitle=subtitle,
+                           w=cfg["w"], h=cfg["h"])
+        except subprocess.CalledProcessError as e:
+            job = RenderJob(project_id=p.id, variant=key, status="failed",
+                            error=(e.stderr or b"").decode("utf-8", "ignore")[-800:])
+            db.add(job)
+            jobs.append(job)
+            continue
+
+        # 内容寻址：与成片同一套约定（CDN / 网关按 URL 缓存，固定文件名会拿到旧图）
+        digest = hashlib.md5(out.read_bytes()).hexdigest()[:8]
+        final = out.with_name(f"{stem}_{digest}.jpg")
+        if final != out:
+            if final.exists():
+                final.unlink()
+            out.rename(final)
+            for stale in final.parent.glob(f"{stem}_*.jpg"):
+                if stale.name != final.name:
+                    stale.unlink(missing_ok=True)
+
+        job = db.execute(
+            select(RenderJob).where(RenderJob.project_id == p.id,
+                                    RenderJob.variant == key)).scalars().first()
+        if job is None:
+            job = RenderJob(project_id=p.id, variant=key)
+            db.add(job)
+        job.status = "done"
+        job.progress = 100
+        job.output_path = str(final)
+        job.size_mb = round(final.stat().st_size / 1024 / 1024, 2)
+        job.error = ""
+        job.qc = {"kind": "cover", "w": cfg["w"], "h": cfg["h"], "title": p.name,
+                  "subtitle": subtitle, "base": str(base), "font": Path(_cover_font() or "").name}
+        jobs.append(job)
+    db.commit()
+    return jobs
 
 
 def variant_list() -> list[dict]:

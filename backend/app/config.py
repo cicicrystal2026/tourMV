@@ -78,6 +78,12 @@ class Settings:
         self.volc_secret_key = os.environ.get("VOLC_SECRET_KEY", "")
         # 逐句出图是长任务（一句一张），并行几张能显著缩短等待
         self.image_concurrency = int(os.environ.get("IMAGE_CONCURRENCY", "3"))
+        # 字幕字号：按画面**短边**的比例计。1080p 横版下 0.062 ≈ 67px。
+        # 原值硬编码 0.045（≈48px），在 1920 宽的成片里偏小；短视频平台字幕
+        # 普遍在画面高度的 6%~8%，故默认提到 0.062。
+        # 想调大/调小只改这两个数（改完重启后端，重跑合成即生效）。
+        self.sub_font_scale_zh = float(os.environ.get("SUB_FONT_SCALE_ZH", "0.062"))
+        self.sub_font_scale_en = float(os.environ.get("SUB_FONT_SCALE_EN", "0.040"))
         # 汇率（用于把各家美元单价折成人民币做成本估算）
         self.usd_cny = float(os.environ.get("USD_CNY", "7.2"))
         # MiniMax：官方开放平台（api.minimaxi.com 国内站 / api.minimax.io 海外站）

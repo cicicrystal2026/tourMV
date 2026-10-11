@@ -7,7 +7,7 @@ import { useWorkHeartbeat } from '../lib/heartbeat'
 import { Banner, Empty, Modal, PageHeader, ProgressBar, Section, Spinner, StateDot } from '../components/ui'
 import Stepper from '../components/Stepper'
 import Timeline, { usePeaks } from '../components/Timeline'
-import { VARIANT_LABEL, fmtTime, relative } from '../lib/format'
+import { VARIANT_LABEL, fmtTime, isCoverVariant, relative } from '../lib/format'
 
 export default function EditPage() {
   const { projectId } = useParams()
@@ -220,7 +220,10 @@ export default function EditPage() {
   }
   const p = detail.project
   const selectedClip = clips.find((c) => c.id === selected)
-  const rendering = renders.some((r) => r.status === 'running' || r.status === 'queued')
+  // 封面是图片、成片是视频：同一张 render_job 表，展示时分开处理
+  const coverJobs = renders.filter((r) => isCoverVariant(r.variant))
+  const videoRenders = renders.filter((r) => !isCoverVariant(r.variant))
+  const rendering = videoRenders.some((r) => r.status === 'running' || r.status === 'queued')
   // 「短版 2:30–2:50」要求整首歌至少 150 秒；歌不够长（如默认的 120 秒）时这个版本做不出来
   const tooShortForShort = !!tl && tl.duration_s < 150
   const effVariants = variants.filter((k) => !(k === 'short' && tooShortForShort))
@@ -296,7 +299,7 @@ export default function EditPage() {
             {p.status === 'rendering' && (
               // 已确认过精剪：不再有确认按钮，明确告诉用户在合成、合成完自动交付（E2E 反馈「找不到确认入口」）
               <span className="tag-brand" title="多版本合成完成并通过出片自检后，项目自动进入「已交付」">
-                已确认精剪 · 正在合成 {renders.filter((r) => r.status === 'done').length}/{renders.length} 个版本，完成后自动交付
+                已确认精剪 · 正在合成 {videoRenders.filter((r) => r.status === 'done').length}/{videoRenders.length} 个版本，完成后自动交付
               </span>
             )}
           </>
@@ -564,11 +567,43 @@ export default function EditPage() {
                 </div>
               )}
 
-              {renders.length === 0 ? (
+              {/* 封面：合成时一并产出。底图取第一句歌词的景区配图，标题用项目名 */}
+              {coverJobs.length > 0 && (
+                <div className="mb-3 flex flex-wrap gap-3">
+                  {coverJobs.map((c) => (
+                    <div key={c.id} className="flex items-center gap-3 rounded-btn border border-line p-2">
+                      {c.status === 'done' && c.url ? (
+                        <img
+                          src={c.url}
+                          alt={VARIANT_LABEL[c.variant] || '封面'}
+                          className="h-16 w-auto rounded border border-line"
+                        />
+                      ) : (
+                        <div className="grid h-16 w-28 place-items-center rounded bg-black/5 text-[10px] text-ink-faint">
+                          {c.status === 'failed' ? '生成失败' : '生成中'}
+                        </div>
+                      )}
+                      <div className="flex flex-col gap-1">
+                        <span className="text-[11px] font-medium">{VARIANT_LABEL[c.variant] || c.variant}</span>
+                        {c.status === 'done' && c.url && (
+                          <a className="btn btn-sm" href={c.url} download>
+                            下载封面
+                          </a>
+                        )}
+                        {c.status === 'failed' && (
+                          <span className="text-[10px] text-human-dark">{String(c.error || '').slice(0, 60)}</span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {videoRenders.length === 0 ? (
                 <Empty text="还没有成片" />
               ) : (
                 <div className="grid grid-cols-2 gap-3">
-                  {renders.map((r) => (
+                  {videoRenders.map((r) => (
                     <div key={r.id} className="border border-line rounded-btn p-3">
                       <div className="flex items-center gap-2">
                         <StateDot status={r.status} />

@@ -65,7 +65,13 @@ export const VARIANT_LABEL: Record<string, string> = {
   clean: '横版 1920×1080 · 无字幕（供二次剪辑）',
   // 历史版本：sub_zh 当年就是「横版 + 中文字幕」，等价于现在的 landscape
   sub_zh: '横版 1920×1080 · 中文字幕（旧版）',
+  // 封面：是**图片**不是视频，由合成流程一并产出（底图取第一句歌词的景区配图）
+  cover: '横版封面 1920×1080',
+  cover_portrait: '竖版封面 1080×1920',
 }
+
+/** 封面（图片）与成片（视频）混在同一张 render_job 表里，靠 variant 前缀区分。 */
+export const isCoverVariant = (v: string) => (v || '').startsWith('cover')
 
 export const JOB_STATUS_LABEL: Record<string, string> = {
   queued: '排队',
