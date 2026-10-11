@@ -190,6 +190,20 @@ export default function LyricsPage() {
   const locked = !!p.locked
   const gate = detail.gate || { ok: true, reasons: [] }
   const canEditLyrics = p.status === 'lyric_review' && !locked
+  // 用本页刚拉到的检查结果判断能不能确认：检查在后台跑，加载时的闸门结论可能已经过期
+  // （E2E：按钮还亮着，点下去才被后端拒绝，看起来像「点了没反应」）
+  const pendingFacts = checks.filter((c) => c.type === 'fact' && c.status === 'pending')
+  const checkBlock =
+    p.status !== 'lyric_review'
+      ? ''
+      : summary?.state === 'checking'
+        ? '自动检查还没跑完，稍等几秒'
+        : pendingFacts.length
+          ? `还有 ${pendingFacts.length} 条史实疑点未处理，点这里下方「去处理」`
+          : ''
+  const gotoPendingFact = () => {
+    window.setTimeout(() => document.getElementById('first-pending-fact')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 200)
+  }
   const allowMock = !!detail.allow_mock
   const pickedKeys = Object.entries(picked)
     .filter(([k, v]) => v && models.find((m) => m.key === k && (mode === 'selection' ? m.in_selection : m.in_production) && m.usable))
@@ -267,10 +281,12 @@ export default function LyricsPage() {
             {p.status === 'lyric_review' && !locked && (
               <button
                 className="btn-human"
-                disabled={!!busy || !gate.ok || pickedKeys.length === 0 || dirty}
+                disabled={!!busy || !gate.ok || !!checkBlock || pickedKeys.length === 0 || dirty}
                 title={
                   dirty
                     ? '歌词有未保存的修改，先保存版本'
+                    : checkBlock
+                      ? checkBlock
                     : !gate.ok
                       ? gate.reasons.join('；')
                       : pickedKeys.length === 0
@@ -278,7 +294,11 @@ export default function LyricsPage() {
                         : ''
                 }
                 onClick={() =>
-                  act('advance', () => api.advance(p.id, genPayload()), () => loadAll(p.id))
+                  act('advance', () => api.advance(p.id, genPayload()), () => loadAll(p.id)).then(() => {
+                    // 被闸门拒绝时：刷新状态（按钮随之置灰并显示原因），并把要处理的疑点滚到眼前
+                    loadAll(p.id)
+                    gotoPendingFact()
+                  })
                 }
               >
                 {mode === 'selection' ? '确认歌词，发起选型轮' : '确认歌词，开始生曲'}
@@ -321,10 +341,17 @@ export default function LyricsPage() {
           </Banner>
         )}
         {/* 闸门原因逐条摆出来：V1.0 只把按钮置灰，用户不知道差什么 */}
-        {!locked && isHuman && !gate.ok && gate.reasons.length > 0 && (
+        {!locked && isHuman && ((!gate.ok && gate.reasons.length > 0) || !!checkBlock) && (
           <Banner tone="warn">
             <span className="font-medium">还不能进入下一步：</span>
-            {gate.reasons.join('；')}
+            {pendingFacts.length
+              ? `还有 ${pendingFacts.length} 条史实疑点未处理（「采纳」或「保留原文」）`
+              : checkBlock || gate.reasons.join('；')}
+            {pendingFacts.length > 0 && (
+              <button className="ml-2 underline font-medium" onClick={gotoPendingFact}>
+                去处理 ↓
+              </button>
+            )}
           </Banner>
         )}
 
@@ -603,6 +630,7 @@ export default function LyricsPage() {
                   {[...checks].sort((a, b) => Number(b.type === 'fact' && b.status === 'pending') - Number(a.type === 'fact' && a.status === 'pending')).map((c) => (
                     <div
                       key={c.id}
+                      id={c.id === pendingFacts[0]?.id ? 'first-pending-fact' : undefined}
                       className={clsx(
                         'border rounded-btn p-3',
                         c.status === 'pending' && c.type === 'fact' ? 'border-human/40 bg-human-soft/35' : 'border-line bg-white',
@@ -1200,7 +1228,7 @@ const GUIDE: Record<string, { step: number; title: string; desc: string; auto?: 
   lyric_review: {
     step: 2,
     title: '审核歌词',
-    desc: '先看下面「自动检查」里的黄色卡片 —— 那是 AI 查出的史实/字数/韵脚疑点，逐条「采纳」或「保留原文」（保留需写理由）。疑点清零后，在右侧选生产模式或选型轮，再点右上角确认。',
+    desc: '只需处理下面「自动检查」里橙色的「史实」疑点 —— 「采纳」改写或「保留原文」（写一句理由，可一键全部保留）。押韵、字数是建议，可以不管。处理完在右侧选生产模式或选型轮，再点右上角确认。',
   },
   music_generating: {
     step: 2,
