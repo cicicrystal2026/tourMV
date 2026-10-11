@@ -1201,3 +1201,33 @@ def test_distribute_plan_and_copy(client, tmp_path, monkeypatch):
         db.query(RenderJob).filter(RenderJob.project_id == pid).delete()
         db.query(Project).filter(Project.id == pid).delete()
         db.commit()
+
+
+def test_repeat_line_follows_master_status(client, has_real_db):
+    """副歌复唱句以母句当前状态为准：被过期状态写回「待审核」也会自动校正，闸门按实际要审的句数算。"""
+    if not has_real_db:
+        pytest.skip("没有真实库备份")
+    from app import gates
+    from app.db import SessionLocal
+    from app.models import Project, StoryboardShot
+
+    client.post(f"/api/projects/{CHANGBAI}/storyboard/plan?force=true")
+    client.post(f"/api/projects/{CHANGBAI}/storyboard/generate")
+    client.post(f"/api/projects/{CHANGBAI}/storyboard/approve-all")
+    with SessionLocal() as db:
+        rows = db.query(StoryboardShot).filter(StoryboardShot.project_id == CHANGBAI).order_by(StoryboardShot.order).all()
+        dups = [r for r in rows if r.dup_of]
+        if not dups:                        # 这份歌词没有复唱句：把最后一句造成第一句的复唱
+            rows[-1].dup_of = rows[0].order
+            dups = [rows[-1]]
+        dups[0].status = "pending"          # 模拟预审任务用过期状态把复唱句写回待审核
+        db.commit()
+        did = dups[0].id
+    prog = client.get(f"/api/projects/{CHANGBAI}/storyboard").json()["progress"]
+    assert prog["unique_approved"] == prog["unique"] and prog["pending"] == 0
+    with SessionLocal() as db:
+        assert db.get(StoryboardShot, did).status == "approved"       # 已被校正
+        p = db.get(Project, CHANGBAI)
+        p.status = "storyboard_review"
+        db.commit()
+        assert not any("未通过审核" in r for r in gates.check(db, p).reasons)

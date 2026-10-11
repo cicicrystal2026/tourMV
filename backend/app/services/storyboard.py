@@ -888,7 +888,31 @@ def _prev_image_url(row: StoryboardShot) -> str:
     return media_url("storyboard", str(prev[0]))   # 画面统一落在 data/storyboard（素材库镜头也会抽帧到这里）
 
 
+def heal_dups(db: Session, project_id: str) -> int:
+    """复唱句以母句的**当前**状态为准，发现不一致就校正，返回校正的句数。
+
+    为什么需要：sync_dups 是「某个时刻把母句拷给复唱句」。出图后的机器预审要跑十几秒，
+    这期间人已经把母句点了通过；预审跑完再同步时，手里的母句状态还是旧的「待审核」，
+    就把复唱句写回了待审核 —— 页面显示 13/13 已通过，闸门却说还有 1 句没审，
+    而这一句在页面上根本看不到（E2E 实测）。读的时候校正一次，就不依赖时序了。
+    """
+    rows = shots(db, project_id)
+    masters = {r.order: r for r in rows if not r.dup_of}
+    fixed = 0
+    for r in rows:
+        m = masters.get(r.dup_of) if r.dup_of else None
+        if m is None:
+            continue
+        if (r.status, r.asset_id, r.image_path, r.clip_path) != (m.status, m.asset_id, m.image_path, m.clip_path):
+            sync_dups(db, m)
+            fixed += 1
+    if fixed:
+        db.commit()
+    return fixed
+
+
 def progress(db: Session, project_id: str) -> dict:
+    heal_dups(db, project_id)
     rows = shots(db, project_id)
     by = {k: 0 for k in STATUS_LABEL}
     for r in rows:

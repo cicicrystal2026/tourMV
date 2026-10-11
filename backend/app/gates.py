@@ -102,8 +102,9 @@ def check(db: Session, p: Project) -> Gate:
             g.fail("歌词已更新，现有配图对应的是旧歌词，请重新出图")
         if not prog["total"]:
             g.fail("还没有逐句配图")
-        elif not prog["all_approved"]:
-            g.fail(f"还有 {prog['total'] - prog['approved']} 句配图未通过审核")
+        elif prog["unique_approved"] < prog["unique"]:
+            # 按实际要审的句数算（副歌复唱句跟随母句，不单独审）——和页面上显示的数一致
+            g.fail(f"还有 {prog['unique'] - prog['unique_approved']} 句配图未通过审核")
         if not settings().allow_mock:
             fake = [r.order for r in storyboard_svc.shots(db, p.id)
                     if r.provider in ("placeholder", "library_seed")]
