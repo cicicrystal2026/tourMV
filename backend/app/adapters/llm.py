@@ -37,10 +37,18 @@ class LLMAdapter:
         s = settings()
         return s.llm_ready
 
-    def chat(self, messages: list[dict], *, json_mode: bool = False, temperature: float = 0.3,
-             purpose: str = "", project_id: str = "") -> str:
+    def chat_raw(self, messages: list[dict], *, json_mode: bool = False, temperature: float = 0.3,
+                 purpose: str = "", project_id: str = "", model: str | None = None) -> dict:
+        """调用文字模型，返回 {content, model, input_tokens, output_tokens, cost, price_known, elapsed_s}。
+
+        model 可指定（模型对比台用同一个接口地址测不同模型）；不指定用配置的默认模型。
+        费用按上游返回的真实 token × 价格表计算（V1.1 之前这里一律记 0）。
+        """
+        from .. import pricing
+
         if not self.ready:
             raise RuntimeError("LLM 未配置（LLM_BASE_URL / LLM_API_KEY 缺失或 FORCE_MOCK=1）")
+        use = model or self.model
         t0 = time.time()
         try:
             r = requests.post(
@@ -48,7 +56,7 @@ class LLMAdapter:
                 timeout=180,
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 json={
-                    "model": self.model,
+                    "model": use,
                     "messages": messages,
                     "temperature": temperature,
                     **({"response_format": {"type": "json_object"}} if json_mode else {}),
@@ -56,16 +64,28 @@ class LLMAdapter:
             )
             if r.status_code >= 400:
                 raise RuntimeError(explain_error(r.status_code, r.text))
-            content = r.json()["choices"][0]["message"]["content"]
-            record(kind="llm", provider=self.provider, model=self.model, purpose=purpose,
-                   params={"messages": len(messages)}, status="ok",
-                   elapsed_s=time.time() - t0, project_id=project_id)
-            return content
+            data = r.json()
+            content = data["choices"][0]["message"]["content"]
+            usage = data.get("usage") or {}
+            tin, tout = int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0)
+            cost, known = pricing.token_cost(use, tin, tout)
+            elapsed = time.time() - t0
+            record(kind="llm", provider=self.provider, model=use, purpose=purpose,
+                   params={"messages": len(messages), "price_known": known}, status="ok",
+                   elapsed_s=elapsed, cost=cost, input_tokens=tin, output_tokens=tout,
+                   project_id=project_id)
+            return {"content": content, "model": use, "input_tokens": tin, "output_tokens": tout,
+                    "cost": cost, "price_known": known, "elapsed_s": round(elapsed, 2)}
         except Exception as e:
             self.last_error = str(e)[:300]
-            record(kind="llm", provider=self.provider, model=self.model, purpose=purpose,
+            record(kind="llm", provider=self.provider, model=use, purpose=purpose,
                    status="error", elapsed_s=time.time() - t0, error=str(e), project_id=project_id)
             raise
+
+    def chat(self, messages: list[dict], *, json_mode: bool = False, temperature: float = 0.3,
+             purpose: str = "", project_id: str = "") -> str:
+        return self.chat_raw(messages, json_mode=json_mode, temperature=temperature,
+                             purpose=purpose, project_id=project_id)["content"]
 
     def json_chat(self, messages: list[dict], *, fallback: dict | None = None,
                   purpose: str = "", project_id: str = "", temperature: float = 0.3) -> tuple[dict, bool]:

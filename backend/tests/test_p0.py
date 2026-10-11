@@ -1081,3 +1081,123 @@ def test_song_default_and_structure(client):
     r = client.post("/api/projects", json={"name": "测试·默认时长", "destination": "测试"})
     assert r.status_code == 200
     assert client.get(f"/api/projects/{r.json()['id']}").json()["brief"]["duration_s"] == 120
+
+
+def test_token_pricing_and_cost_totals(client, has_real_db):
+    """记账：按真实 token × 价格表计费；未知模型标明单价未配置；项目累计费用含全部环节。"""
+    from app import pricing
+    from app.db import SessionLocal
+    from app.models import AiCall, MusicCandidate, Project
+    from app.observability import record
+
+    cost, known = pricing.token_cost("qwen-plus", 4000, 4800)
+    assert known and abs(cost - 0.0128) < 1e-6
+    assert pricing.token_cost("qwen-plus-2025-07-28", 1_000_000, 0) == (0.8, True)     # 快照名回落到主名
+    assert pricing.token_cost("没见过的模型", 1000, 1000) == (0.0, False)
+
+    with SessionLocal() as db:
+        p = Project(name="测试·记账", destination="x", status="edit_review")
+        db.add(p)
+        db.flush()
+        db.add(MusicCandidate(project_id=p.id, model_key="mureka", model_name="Mureka", status="done",
+                              cost=0.324, is_mock=False, label="A"))
+        db.commit()
+        pid = p.id
+    record(kind="llm", provider="x", model="qwen-plus", purpose="t", cost=0.0128, input_tokens=4000,
+           output_tokens=4800, project_id=pid)
+    record(kind="image", provider="seedream", model="m", purpose="t", cost=0.21, project_id=pid)
+    d = client.get(f"/api/projects/{pid}/calls").json()
+    assert abs(d["project_total_cost"] - (0.0128 + 0.21 + 0.324)) < 1e-6     # 以前只有生曲的 0.324
+    assert d["by_kind"]["llm"]["input_tokens"] == 4000 and d["by_kind"]["music"]["cost"] == 0.324
+    assert {m["kind"] for m in d["by_model"]} == {"llm", "image", "music"}
+    with SessionLocal() as db:
+        db.query(AiCall).filter(AiCall.project_id == pid).delete()
+        db.query(MusicCandidate).filter(MusicCandidate.project_id == pid).delete()
+        db.query(Project).filter(Project.id == pid).delete()
+        db.commit()
+
+
+def test_bench_rating_summary_and_export(client):
+    """对比台：一轮只能有一个最佳；汇总给出均价、均分与每元得分；可导出。"""
+    from app.db import SessionLocal
+    from app.models import BenchResult, BenchRun
+    from app.services import bench as B
+
+    with SessionLocal() as db:
+        run = BenchRun(kind="image", title="断桥柳影", destination="杭州·西湖", input={"prompt": "断桥"})
+        db.add(run)
+        db.flush()
+        a = BenchResult(run_id=run.id, kind="image", provider="wanx", model="wanx2.1-t2i-plus", status="done",
+                        cost=0.20, elapsed_s=30, ai_score=80)
+        b = BenchResult(run_id=run.id, kind="image", provider="seedream", model="seedream-5", status="done",
+                        cost=0.21, elapsed_s=12, ai_score=90)
+        db.add_all([a, b])
+        db.commit()
+        rid, aid, bid = run.id, a.id, b.id
+    assert client.put(f"/api/bench/results/{aid}", json={"score": 3, "picked": True}).status_code == 200
+    r = client.put(f"/api/bench/results/{bid}", json={"score": 5, "picked": True}).json()
+    assert r["picked"] and r["human_score"] == 5
+    d = client.get(f"/api/bench/runs/{rid}").json()
+    assert [x["picked"] for x in d["results"]] == [False, True]          # 改选后上一个取消
+    assert client.put(f"/api/bench/results/{aid}", json={"score": 9}).status_code == 400
+    s = {x["key"]: x for x in client.get("/api/bench/summary").json()["image"]}
+    assert s["seedream"]["avg_human"] == 5 and s["seedream"]["picked"] == 1
+    assert s["seedream"]["score_per_yuan"] == round(5 / 0.21, 1) and s["wanx"]["score_per_yuan"] == 15.0
+    csv_text = client.get("/api/bench/export").text
+    assert "断桥柳影" in csv_text and "seedream-5" in csv_text
+    assert "image" in client.get("/api/bench/options").json()
+    with SessionLocal() as db:
+        db.query(BenchResult).filter(BenchResult.run_id == rid).delete()
+        db.query(BenchRun).filter(BenchRun.id == rid).delete()
+        db.commit()
+
+
+def test_distribute_plan_and_copy(client, tmp_path, monkeypatch):
+    """一键分发：按渠道规则复制、规范命名、附说明；未交付不分发；自检未过的版本不分发。"""
+    from datetime import datetime, timezone
+
+    from app.adapters import media
+    from app.db import SessionLocal
+    from app.models import DistributeLog, Project, RenderJob
+    from app.services import distribute as D
+
+    root = tmp_path / "数字资产"
+    root.mkdir()
+    monkeypatch.setenv("DISTRIBUTE_ROOT", str(root))
+    monkeypatch.setattr(D, "_cfg_path", lambda: tmp_path / "distribute.json")
+    clip = tmp_path / "a.mp4"
+    media.generate_test_clip(clip, seconds=3, width=320, height=180, label="x")
+
+    with SessionLocal() as db:
+        p = Project(name="测试·分发", destination="杭州·西湖", status="rendering")
+        db.add(p)
+        db.flush()
+        for v, qc in (("sub_zh_en", True), ("highlight30", True), ("essence60", False)):
+            db.add(RenderJob(project_id=p.id, variant=v, status="done", output_path=str(clip),
+                             qc={"ok": qc, "checks": []}))
+        db.commit()
+        pid = p.id
+
+    assert client.post(f"/api/distribute/projects/{pid}", json={}).status_code == 400      # 未交付
+    with SessionLocal() as db:
+        db.get(Project, pid).locked_at = datetime.now(timezone.utc)
+        db.commit()
+    plan = client.get(f"/api/distribute/projects/{pid}").json()
+    yt = next(c for c in plan["channels"] if c["key"] == "youtube")
+    assert {f["variant"] for f in yt["files"]} == {"sub_zh_en", "highlight30", "essence60"}
+    assert "portrait" in plan["missing_variants"] and yt["blocked"] == ["精华版"]
+
+    out = client.post(f"/api/distribute/projects/{pid}", json={"channels": ["youtube", "douyin"]}).json()
+    assert {c["key"] for c in out["channels"]} == {"youtube", "douyin"}
+    day = datetime.now().strftime("%Y%m%d")
+    folder = root / "youtube" / f"杭州西湖_{day}"
+    names = sorted(x.name for x in folder.iterdir())
+    assert f"杭州西湖_YouTube_横版中英字幕_3s_{day}.mp4" in names and "说明.md" in names and "分发清单.json" in names
+    assert not any("精华版" in n for n in names)                    # 自检没过的不分发
+    assert "YouTube" in (folder / "说明.md").read_text(encoding="utf-8")
+    assert (root / "抖音" / f"杭州西湖_{day}").is_dir() and not (root / "小红书").exists()
+    with SessionLocal() as db:
+        db.query(DistributeLog).filter(DistributeLog.project_id == pid).delete()
+        db.query(RenderJob).filter(RenderJob.project_id == pid).delete()
+        db.query(Project).filter(Project.id == pid).delete()
+        db.commit()

@@ -177,6 +177,24 @@ export const api = {
   render: (id: string, body: Json = {}) => post(`/api/projects/${id}/render`, body),
   renders: (id: string) => get(`/api/projects/${id}/renders`),
   renderVariants: () => get('/api/render/variants'),
+
+  // 模型对比台
+  benchOptions: () => get('/api/bench/options'),
+  benchRuns: (kind = '') => get(`/api/bench/runs?kind=${kind}`),
+  benchRun: (id: string) => get(`/api/bench/runs/${id}`),
+  benchShots: (projectId: string) => get(`/api/bench/shots?project_id=${projectId}`),
+  benchImage: (body: Json) => post('/api/bench/image', body),
+  benchLyric: (body: Json) => post('/api/bench/lyric', body),
+  benchRate: (resultId: string, body: Json) => put(`/api/bench/results/${resultId}`, body),
+  benchSummary: () => get('/api/bench/summary'),
+  benchExportUrl: '/api/bench/export',
+
+  // 一键分发
+  distConfig: () => get('/api/distribute/config'),
+  distSaveConfig: (body: Json) => put('/api/distribute/config', body),
+  distProjects: () => get('/api/distribute/projects'),
+  distPlan: (id: string) => get(`/api/distribute/projects/${id}`),
+  distRun: (id: string, channels?: string[]) => post(`/api/distribute/projects/${id}`, { channels }),
   // 重做歌词强制对齐（音画同步）→ 自动按新时间轴重新卡点
   realignTimeline: (id: string) => post(`/api/projects/${id}/timeline/align`),
   preview: (id: string) => get(`/api/projects/${id}/preview`),

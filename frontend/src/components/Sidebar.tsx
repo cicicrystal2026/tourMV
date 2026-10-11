@@ -8,6 +8,8 @@ const NAV = [
   { to: '/edit', label: '剪辑工作台', hint: '粗剪 · 精剪 · 导出' },
   { to: '/assets', label: '素材库管理', hint: '上传 · 打标 · 检索' },
   { to: '/kb', label: '文化知识库', hint: '核实条目 · 史实出处' },
+  { to: '/bench', label: '模型对比台', hint: '效果 · 费用 · 用时' },
+  { to: '/distribute', label: '成片分发', hint: '按渠道 · 入数字资产' },
 ]
 
 const PLACEHOLDER = [

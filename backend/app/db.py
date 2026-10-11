@@ -105,6 +105,7 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     },
     # ---- PRD V1.1 ----
     "project": {"locked_at": "DATETIME", "parent_project_id": "VARCHAR(36)"},
+    "ai_call": {"input_tokens": "INTEGER DEFAULT 0", "output_tokens": "INTEGER DEFAULT 0"},
     "lyric_version": {"checks_done": "BOOLEAN DEFAULT 0"},
     "lyric_check": {"keep_reason": "TEXT DEFAULT ''", "needs_manual": "BOOLEAN DEFAULT 0",
                     "kb_entry_ids": "JSON"},

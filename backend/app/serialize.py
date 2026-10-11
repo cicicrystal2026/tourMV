@@ -234,4 +234,5 @@ def ai_call(c: AiCall) -> dict:
     return {"id": c.id, "kind": c.kind, "provider": c.provider, "model": c.model,
             "purpose": c.purpose, "status": c.status, "elapsed_s": c.elapsed_s,
             "cost": c.cost, "error": c.error, "project_id": c.project_id,
+            "input_tokens": c.input_tokens or 0, "output_tokens": c.output_tokens or 0,
             "created_at": dt(c.created_at)}

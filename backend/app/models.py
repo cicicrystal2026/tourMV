@@ -482,3 +482,52 @@ class AiCall(IdMixin, TimestampMixin, Base):
     elapsed_s: Mapped[float] = mapped_column(Float, default=0.0)
     cost: Mapped[float] = mapped_column(Float, default=0.0)
     error: Mapped[str] = mapped_column(Text, default="")
+    # 按 token 计费的模型（文字 / 视觉）记录真实用量；按张、按首计费的为 0
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+
+
+# ------------------------------------------------------- 模型对比台
+class BenchRun(IdMixin, TimestampMixin, Base):
+    """一次对比：同一个输入（一句歌词 / 一份简报）交给多个模型，并排比较效果与费用。"""
+
+    __tablename__ = "bench_run"
+
+    kind: Mapped[str] = mapped_column(String(20), index=True)        # image / lyric
+    title: Mapped[str] = mapped_column(String(200), default="")
+    destination: Mapped[str] = mapped_column(String(100), default="")
+    input: Mapped[dict] = mapped_column(JSON, default=dict)          # 生图：place/line/prompt；写词：genre/mood/duration_s
+
+
+class BenchResult(IdMixin, TimestampMixin, Base):
+    __tablename__ = "bench_result"
+
+    run_id: Mapped[str] = mapped_column(String(36), ForeignKey("bench_run.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(20), default="")
+    provider: Mapped[str] = mapped_column(String(40), default="")    # 生图：wanx / seedream / jimeng
+    model: Mapped[str] = mapped_column(String(120), default="")
+    status: Mapped[str] = mapped_column(String(20), default="queued")   # queued / running / done / failed
+    error: Mapped[str] = mapped_column(Text, default="")
+    output: Mapped[dict] = mapped_column(JSON, default=dict)         # 生图：image_path/width/height；写词：sections/lines/meter_bad
+    cost: Mapped[float] = mapped_column(Float, default=0.0)
+    price_known: Mapped[bool] = mapped_column(Boolean, default=True)
+    elapsed_s: Mapped[float] = mapped_column(Float, default=0.0)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    ai_score: Mapped[int] = mapped_column(Integer, default=-1)       # 机器预审分（生图），-1 = 未评
+    ai_reason: Mapped[str] = mapped_column(Text, default="")
+    human_score: Mapped[int] = mapped_column(Integer, default=0)     # 人工 1–5，0 = 未评
+    picked: Mapped[bool] = mapped_column(Boolean, default=False)     # 这一轮里人工选的最佳
+    note: Mapped[str] = mapped_column(Text, default="")
+
+
+# ------------------------------------------------------- 分发记录
+class DistributeLog(IdMixin, TimestampMixin, Base):
+    """成片分发到本地数字资产目录的记录（哪支片、哪个渠道、放到了哪里、哪些文件）。"""
+
+    __tablename__ = "distribute_log"
+
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    channel: Mapped[str] = mapped_column(String(40), default="")
+    folder: Mapped[str] = mapped_column(String(500), default="")
+    files: Mapped[list] = mapped_column(JSON, default=list)

@@ -22,6 +22,8 @@ def record(
     cost: float = 0.0,
     error: str = "",
     project_id: str = "",
+    input_tokens: int = 0,
+    output_tokens: int = 0,
 ) -> None:
     try:
         with session_scope() as db:
@@ -34,7 +36,9 @@ def record(
                     params_digest=json.dumps(params or {}, ensure_ascii=False)[:2000],
                     status=status,
                     elapsed_s=round(elapsed_s, 2),
-                    cost=round(cost, 4),
+                    cost=round(cost, 6),
+                    input_tokens=int(input_tokens or 0),
+                    output_tokens=int(output_tokens or 0),
                     error=error[:1000],
                     project_id=project_id,
                 )

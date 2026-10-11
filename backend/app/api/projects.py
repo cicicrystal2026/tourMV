@@ -194,12 +194,38 @@ def project_calls(project_id: str, db: Session = Depends(get_db)) -> dict:
     rows = list(db.execute(select(AiCall).where(AiCall.project_id == project_id)
                            .order_by(AiCall.created_at.desc())).scalars())
     p = svc.get(db, project_id)
+    from ..models import MusicCandidate
+
     by_kind: dict[str, dict] = {}
+    by_model: dict[str, dict] = {}
     for c in rows:
-        g = by_kind.setdefault(c.kind, {"calls": 0, "cost": 0.0, "elapsed_s": 0.0, "errors": 0})
+        g = by_kind.setdefault(c.kind, {"calls": 0, "cost": 0.0, "elapsed_s": 0.0, "errors": 0,
+                                        "input_tokens": 0, "output_tokens": 0})
         g["calls"] += 1
         g["cost"] = round(g["cost"] + c.cost, 4)
         g["elapsed_s"] = round(g["elapsed_s"] + c.elapsed_s, 2)
         g["errors"] += 1 if c.status == "error" else 0
-    return {"project_total_cost": p.total_cost, "by_kind": by_kind,
+        g["input_tokens"] += c.input_tokens or 0
+        g["output_tokens"] += c.output_tokens or 0
+        if c.status == "ok":
+            m = by_model.setdefault(f"{c.kind}:{c.model}", {"kind": c.kind, "model": c.model, "calls": 0, "cost": 0.0})
+            m["calls"] += 1
+            m["cost"] = round(m["cost"] + c.cost, 4)
+    # 生曲费用记在候选曲目上（按首计价），不在调用记录里；占位曲不花钱
+    songs = [x for x in db.execute(select(MusicCandidate).where(MusicCandidate.project_id == project_id)).scalars()
+             if x.status == "done" and not x.is_mock]
+    if songs:
+        by_kind["music"] = {"calls": len(songs), "cost": round(sum(x.cost or 0 for x in songs), 4),
+                            "elapsed_s": round(sum(x.elapsed_s or 0 for x in songs), 2), "errors": 0,
+                            "input_tokens": 0, "output_tokens": 0}
+        for x in songs:
+            m = by_model.setdefault(f"music:{x.model_name or x.model_key}",
+                                    {"kind": "music", "model": x.model_name or x.model_key, "calls": 0, "cost": 0.0})
+            m["calls"] += 1
+            m["cost"] = round(m["cost"] + (x.cost or 0), 4)
+    # 累计费用 = 全部环节之和。V1.1 之前这里只返回 project.total_cost，而它只累计了生曲，
+    # 生图、写词、预审的钱都没算进去（一支歌显示 ¥0.32，实际约 ¥3.1）
+    total = round(sum(v["cost"] for v in by_kind.values()), 4)
+    return {"project_total_cost": total, "by_kind": by_kind,
+            "by_model": sorted(by_model.values(), key=lambda v: -v["cost"]),
             "calls": [S.ai_call(c) for c in rows[:200]]}

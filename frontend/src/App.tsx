@@ -8,6 +8,8 @@ import EditPage from './pages/Edit'
 import AssetsPage from './pages/Assets'
 import StoryboardPage from './pages/Storyboard'
 import KnowledgeBase from './pages/KnowledgeBase'
+import BenchPage from './pages/Bench'
+import DistributePage from './pages/Distribute'
 import api from './lib/api'
 
 /** 本地开发（没启后端基本就是自己忘了）与线上（多为网络抖动）要给出完全不同的提示 */
@@ -162,6 +164,8 @@ function Shell() {
           <Route path="/edit" element={<EditPage />} />
           <Route path="/assets" element={<AssetsPage />} />
           <Route path="/kb" element={<KnowledgeBase />} />
+          <Route path="/bench" element={<BenchPage />} />
+          <Route path="/distribute" element={<DistributePage />} />
         </Routes>
       </main>
     </div>

@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
     s = settings()
     init_db()
     # 让任务处理器注册到队列（import 即注册）
-    from .workers import tasks  # noqa: F401
+    from .workers import bench_tasks, tasks  # noqa: F401
 
     from .db import session_scope
     from .services import assets as assets_svc

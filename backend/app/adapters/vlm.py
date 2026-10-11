@@ -48,6 +48,15 @@ def _system(destination: str) -> str:
 
 # 备用模型：阿里云会下线旧模型（qwen-vl-plus 于 2026-10 起返回 404 Model not exist，
 # 打标和图文预审同时失效且没有任何提示）。主模型不存在时按顺序换下一个，并记住可用的那个。
+import threading
+
+_USAGE = threading.local()       # 最近一次 _chat 的真实用量与费用（按线程）
+
+
+def last_usage() -> dict:
+    return dict(getattr(_USAGE, "value", None) or {"cost": 0.004, "input_tokens": 0, "output_tokens": 0})
+
+
 FALLBACK_MODELS = ["qwen3-vl-plus", "qwen3-vl-flash", "qwen-vl-max-latest"]
 _working_model: str | None = None
 
@@ -55,6 +64,7 @@ _working_model: str | None = None
 def _chat(messages: list[dict], temperature: float = 0.2, timeout: int = 180) -> str:
     """调用 VLM，返回文本内容。模型不存在时自动换备用模型；其余错误带上游原因抛出。"""
     global _working_model
+    from .. import pricing
     from .llm import explain_error
 
     s = settings()
@@ -71,7 +81,13 @@ def _chat(messages: list[dict], temperature: float = 0.2, timeout: int = 180) ->
         if r.status_code >= 400:
             raise RuntimeError(explain_error(r.status_code, r.text))
         _working_model = m
-        return r.json()["choices"][0]["message"]["content"]
+        data = r.json()
+        usage = data.get("usage") or {}
+        tin, tout = int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0)
+        cost, known = pricing.token_cost(m, tin, tout)
+        # 上游没返回用量或价格表里没有这个模型时，按经验值 ¥0.004/次估（并标明是估算）
+        _USAGE.value = {"cost": cost if (known and tin) else 0.004, "input_tokens": tin, "output_tokens": tout}
+        return data["choices"][0]["message"]["content"]
     raise RuntimeError(f"{last}；备用模型也不可用，请在 .env 里把 VLM_MODEL 改成当前可用的视觉模型")
 
 
@@ -127,7 +143,7 @@ def _real(frame_paths: list[str], destination: str = "") -> dict:
         data["confidence"] = 0.0
     data["engine"] = "vlm"
     record(kind="vlm", provider="qwen-vl", model=current_model(), purpose="tagging", status="ok",
-           elapsed_s=time.time() - t0, cost=0.004)
+           elapsed_s=time.time() - t0, **last_usage())
     return data
 
 
@@ -205,7 +221,7 @@ def judge_image(img_path: str, line: str, place: str, destination: str,
         score = _score(data)
         # qwen-vl-plus 单图一次约千余 token，按 ¥0.004/次估
         record(kind="vlm", provider="qwen-vl", model=s.vlm_model, purpose="shot_judge",
-               status="ok", elapsed_s=time.time() - t0, cost=0.004, project_id=project_id)
+               status="ok", elapsed_s=time.time() - t0, project_id=project_id, **last_usage())
         reason = str(data.get("reason") or "")[:120]
         if str(data.get("text", "")).strip() == "有" and "文字" not in reason:
             reason = ("画面含文字（AI 生成的字多为乱码，需人工核对）；" + reason)[:120]
