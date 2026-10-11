@@ -212,7 +212,6 @@ def auto_cut(db: Session, project_id: str, keep_manual: bool = True) -> Timeline
     used: set[str] = {c.asset_id for c in old.values() if c.locked and c.asset_id and keep_manual}
     counts: dict[str, int] = {}
     last_id: str | None = None
-    order = 0
     # 先收集，再统一「收口」——因为歌词逐句对齐后句子之间会留空隙
     # （间奏、拖腔），如果每段只按句子时长排，镜头之间就有黑洞：
     # 画面总长会明显短于音频，成片在音乐还没结束时就没了。
@@ -521,9 +520,9 @@ def timeline_payload(db: Session, project_id: str) -> dict:
 
 
 def _video_url(a: Asset) -> str:
-    if not a.file_path:
-        return ""
-    return f"/media/assets/{basename(a.file_path)}"
+    from ..serialize import asset_url
+
+    return asset_url(a.file_path)
 
 
 def update_clip(db: Session, clip_id: str, *, asset_id: str | None = None,

@@ -43,6 +43,19 @@ def media_url(kind: str, path: str) -> str:
     return f"/media/{kind}/{basename(path)}"
 
 
+def asset_url(path: str) -> str:
+    """素材视频的访问地址，保留 assets/ 之后的子目录。
+
+    AI 分镜片段存在 data/assets/storyboard/ 下，只取文件名会得到 /media/assets/x.mp4（404），
+    剪辑工作台的预览因此一直是黑屏。
+    """
+    if not path:
+        return ""
+    norm = path.replace("\\", "/")
+    rel = norm.rsplit("/assets/", 1)[1] if "/assets/" in norm else basename(norm)
+    return f"/media/assets/{rel}"
+
+
 def dt(v):
     """时间戳统一按 UTC 输出成带时区的 ISO 8601。
 
@@ -69,6 +82,9 @@ def project(p: Project) -> dict:
         "selected_candidate_id": p.selected_candidate_id,
         "total_cost": p.total_cost, "reject_count": p.reject_count,
         "reject_targets": sm.REJECT_TARGETS.get(p.status, []),
+        # 驳回按钮显示中文状态名（V1.0 直接显示 storyboard_review 这样的内部 key）
+        "reject_target_labels": {k: sm.STATES[k].label for k in sm.REJECT_TARGETS.get(p.status, [])
+                                 if k in sm.STATES},
         "next_state": sm.next_state(p.status),
         "locked": p.locked_at is not None, "locked_at": dt(p.locked_at),
         "parent_project_id": p.parent_project_id,
@@ -148,7 +164,7 @@ def asset(a: Asset, tags: dict | None = None, score: float | None = None) -> dic
     return {
         "id": a.id, "name": a.name, "destination": a.destination,
         "thumb_url": media_url("thumbs", a.thumb_path),
-        "video_url": media_url("assets", a.file_path),
+        "video_url": asset_url(a.file_path),
         "duration_s": a.duration_s, "width": a.width, "height": a.height, "fps": a.fps,
         "license_status": a.license_status, "licensor": a.licensor,
         "license_no": a.license_no, "scope": a.scope, "valid_until": a.valid_until,
@@ -179,7 +195,7 @@ def clip(c: TimelineClip, a: Asset | None) -> dict:
         "id": c.id, "order": c.order, "asset_id": c.asset_id,
         "asset_name": a.name if a else "（未匹配）",
         "thumb_url": media_url("thumbs", a.thumb_path) if a else "",
-        "video_url": media_url("assets", a.file_path) if a else "",
+        "video_url": asset_url(a.file_path) if a else "",
         "in_s": c.in_s, "out_s": c.out_s, "start_s": c.start_s, "end_s": c.end_s,
         "lyric_line": c.lyric_line, "scene_prompt": c.scene_prompt,
         "locked": c.locked, "manual": c.manual,

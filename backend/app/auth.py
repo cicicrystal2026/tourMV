@@ -29,6 +29,26 @@ PUBLIC_PATHS = {"/api/health", "/api/auth/login", "/api/auth/status"}
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
+# 登录失败计数（进程内）：{来源: [失败时间戳]}
+_FAILS: dict[str, list[float]] = {}
+FAIL_LIMIT, FAIL_WINDOW_S = 5, 60.0
+
+
+def _too_many(ip: str) -> bool:
+    import time
+
+    now = time.time()
+    recent = [t for t in _FAILS.get(ip, []) if now - t < FAIL_WINDOW_S]
+    _FAILS[ip] = recent
+    return len(recent) >= FAIL_LIMIT
+
+
+def _note_fail(ip: str) -> None:
+    import time
+
+    _FAILS.setdefault(ip, []).append(time.time())
+
+
 def enabled() -> bool:
     return bool(settings().access_password)
 
@@ -67,7 +87,13 @@ def status(request: Request) -> dict:
 def login(request: Request, response: Response, payload: dict = Body(...)) -> dict:
     if not enabled():
         return {"ok": True, "enabled": False}
+    ip = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "")
+          ).split(",")[0].strip() or "?"
+    if _too_many(ip):
+        raise HTTPException(status_code=429, detail="尝试次数过多，请 1 分钟后再试")
     pwd = str(payload.get("password") or "")
+    if not hmac.compare_digest(pwd, settings().access_password):
+        _note_fail(ip)
     if not hmac.compare_digest(pwd, settings().access_password):
         time.sleep(0.8)   # 粗暴但有效：拖慢暴力尝试
         raise HTTPException(status_code=401, detail="口令不正确")

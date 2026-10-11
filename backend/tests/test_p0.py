@@ -873,3 +873,27 @@ def test_event_fingerprint_changes_on_state_change(client):
     with SessionLocal() as db:
         db.query(Project).filter(Project.id == pid).delete()
         db.commit()
+
+
+def test_audit_fixes(client, has_real_db, monkeypatch):
+    """自查修复：素材地址保留子目录、已交付项目不能重跑歌词检查、登录防爆破、驳回目标有中文名。"""
+    from app import auth
+    from app.serialize import asset_url
+
+    assert asset_url(r"C:\data\assets\storyboard\sb-x-0.mp4") == "/media/assets/storyboard/sb-x-0.mp4"
+    assert asset_url("/srv/data/assets/a.mp4") == "/media/assets/a.mp4" and asset_url("") == ""
+
+    if has_real_db:
+        assert client.post(f"/api/projects/{BEIJING}/lyrics/check").status_code == 400
+        assert client.post(f"/api/projects/{BEIJING}/music/regenerate", json={}).status_code == 400
+        p = client.get(f"/api/projects/{CHANGBAI}").json()["project"]
+        assert all(p["reject_target_labels"].get(k) for k in p["reject_targets"])
+
+    monkeypatch.setattr(auth.settings(), "access_password", "s3cret")
+    monkeypatch.setattr(auth.settings(), "session_secret", "wenlv:s3cret")
+    auth._FAILS.clear()
+    codes = [client.post("/api/auth/login", json={"password": "bad"}).status_code for _ in range(7)]
+    assert codes[:5] == [401] * 5 and codes[5] == 429, codes
+    auth._FAILS.clear()
+    assert client.post("/api/auth/login", json={"password": "s3cret"}).status_code == 200
+    auth._FAILS.clear()

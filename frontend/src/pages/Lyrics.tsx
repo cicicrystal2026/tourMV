@@ -1128,7 +1128,7 @@ export default function LyricsPage() {
                 })
               }
             >
-              驳回到：{t}
+              驳回到：{p.reject_target_labels?.[t] || t}
             </button>
           ))}
         </div>

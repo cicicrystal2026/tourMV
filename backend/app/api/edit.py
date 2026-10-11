@@ -73,12 +73,12 @@ def realign(project_id: str, db: Session = Depends(get_db)) -> dict:
     """
     if db.get(Project, project_id) is None:
         _fail(ProjectError("项目不存在"))
+    # 卡点由对齐任务成功后再派发（then_cut）：原来两个任务一起入队，
+    # 对齐失败时卡点照跑，拿旧时间轴白白重排一遍
     j1 = enqueue(db, "audio_analyze", queue="gpu", project_id=project_id,
-                 ref_id=project_id, name="重做歌词强制对齐")
-    j2 = enqueue(db, "rough_cut", queue="gpu", project_id=project_id,
-                 ref_id=project_id, name="按新时间轴重新卡点")
+                 ref_id=project_id, name="重做歌词强制对齐", payload={"then_cut": True})
     db.commit()
-    return {"job_id": j1.id, "cut_job_id": j2.id}
+    return {"job_id": j1.id}
 
 
 @router.post("/projects/{project_id}/timeline/analyze")

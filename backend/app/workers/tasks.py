@@ -324,6 +324,8 @@ def h_audio_analyze(ctx: JobContext) -> None:
     ctx.set_result({"bpm": tl.bpm, "lines": len(tl.lyric_lines or []), "duration_s": tl.duration_s})
     if _advance_if(ctx.db, pid, "audio_analyzing", "rough_cutting"):
         enqueue(ctx.db, "rough_cut", queue="gpu", project_id=pid, ref_id=pid, name="镜头匹配与卡点")
+    elif (ctx.job().payload or {}).get("then_cut"):
+        enqueue(ctx.db, "rough_cut", queue="gpu", project_id=pid, ref_id=pid, name="按新时间轴重新卡点")
 
 
 @handler("rough_cut")

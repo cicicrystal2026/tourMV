@@ -7,11 +7,12 @@ from sqlalchemy.orm import Session
 from .. import serialize as S
 from .. import state_machine as sm
 from ..db import get_db
+from .deps import guard_locked
 from ..models import LyricCheck
 from ..services import lyrics as svc
 from ..services.projects import ProjectError, get as get_project
 
-router = APIRouter(prefix="/api", tags=["lyrics"])
+router = APIRouter(prefix="/api", tags=["lyrics"], dependencies=[Depends(guard_locked)])
 
 # 只有「待确认歌词」阶段能改词。V1.0 在生曲之后仍能改词，
 # 结果是候选曲唱的是旧版歌词、字幕却是新版 —— 要改就驳回到这一步。

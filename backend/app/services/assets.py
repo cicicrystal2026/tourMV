@@ -18,7 +18,7 @@ from ..adapters import image as image_ad
 from ..adapters import llm
 from ..config import settings
 from ..models import Asset, AssetTag, TimelineClip
-from ..serialize import basename
+from ..serialize import asset_url, basename
 from . import prompts
 from .projects import ProjectError
 
@@ -208,7 +208,7 @@ def search(db: Session, *, q: str = "", filters: dict[str, list[str]] | None = N
         out.append({
             "id": a.id, "name": a.name,
             "thumb_url": f"/media/thumbs/{basename(a.thumb_path)}" if a.thumb_path else "",
-            "video_url": f"/media/assets/{basename(a.file_path)}" if a.file_path else "",
+            "video_url": asset_url(a.file_path),
             "destination": a.destination, "duration_s": a.duration_s,
             "width": a.width, "height": a.height,
             "license_status": a.license_status, "licensor": a.licensor,
@@ -280,7 +280,7 @@ def detail(db: Session, asset_id: str) -> dict:
         "file_path": basename(a.file_path),
         "source": a.source, "is_seed": a.is_seed,
         "thumb_url": f"/media/thumbs/{basename(a.thumb_path)}" if a.thumb_path else "",
-        "video_url": f"/media/assets/{basename(a.file_path)}" if a.file_path else "",
+        "video_url": asset_url(a.file_path),
         "duration_s": a.duration_s, "width": a.width, "height": a.height, "fps": a.fps,
         "license_status": a.license_status, "licensor": a.licensor, "license_no": a.license_no,
         "scope": a.scope, "valid_until": a.valid_until, "portrait": a.portrait,

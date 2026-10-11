@@ -9,11 +9,12 @@ from sqlalchemy.orm import Session
 
 from .. import serialize as S
 from ..db import get_db
+from .deps import guard_locked
 from ..models import MusicModel, Rating
 from ..services import music as svc
 from ..services.projects import ProjectError
 
-router = APIRouter(prefix="/api", tags=["music"])
+router = APIRouter(prefix="/api", tags=["music"], dependencies=[Depends(guard_locked)])
 
 
 def _fail(e: Exception):

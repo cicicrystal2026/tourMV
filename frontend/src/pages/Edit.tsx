@@ -260,7 +260,7 @@ export default function EditPage() {
           <>
             {p.reject_targets?.length > 0 && (
               <button className="btn" disabled={!!busy} onClick={() => act('reject', () => api.reject(p.id, p.reject_targets[0]), () => load(p.id))}>
-                驳回到 {p.reject_targets[0]}
+                驳回到「{p.reject_target_labels?.[p.reject_targets[0]] || p.reject_targets[0]}」
               </button>
             )}
             <button

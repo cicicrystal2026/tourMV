@@ -44,6 +44,11 @@ def _as_tensor(out, key: str):
     raise RuntimeError(f"无法从 {type(out).__name__} 取出特征向量")
 
 
+import threading
+
+_LOAD_LOCK = threading.Lock()
+
+
 class _ClipEncoder:
     """惰性加载真 Chinese-CLIP；失败则永久退化为哈希编码。"""
 
@@ -55,9 +60,17 @@ class _ClipEncoder:
     def _load(self) -> None:
         if self._tried:
             return
-        self._tried = True
+        # 加锁：加载要十几秒，期间其它线程必须等结果，而不是看到「已尝试、未成功」
+        # 就退回哈希编码（会把哈希向量写进库、检索结果全错）
+        with _LOAD_LOCK:
+            if self._tried:
+                return
+            self._load_locked()
+
+    def _load_locked(self) -> None:
         if settings().force_mock:
             self._ok = False      # 演示/测试模式不加载大模型
+            self._tried = True
             return
         try:
             import os
@@ -72,6 +85,7 @@ class _ClipEncoder:
             self._ok = True
         except Exception:
             self._ok = False
+        self._tried = True
 
     @property
     def is_real(self) -> bool:
