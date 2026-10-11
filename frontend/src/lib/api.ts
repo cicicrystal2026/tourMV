@@ -152,6 +152,7 @@ export const api = {
   rollbackLyrics: (id: string, version: number) => post(`/api/projects/${id}/lyrics/rollback/${version}`),
   adoptCheck: (checkId: string, index = 0) => post(`/api/lyrics/checks/${checkId}/adopt`, { index }),
   /** 保留原文：必须写理由（PRD V1.1 F2-5） */
+  keepAllChecks: (id: string, reason: string) => post(`/api/projects/${id}/lyrics/checks/keep-all`, { reason, type: 'fact' }),
   keepCheck: (checkId: string, reason: string) => post(`/api/lyrics/checks/${checkId}/keep`, { reason }),
 
   // 音乐

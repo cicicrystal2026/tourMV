@@ -549,8 +549,13 @@ export default function LyricsPage() {
                   {summary.state === 'done' &&
                     summary.by_type &&
                     Object.entries(summary.by_type).map(([k, v]: any) => (
-                      <span key={k} className={v.pending ? 'tag-human' : 'tag'}>
-                        {CHECK_TYPE_LABEL[k]} {v.pending ? `${v.pending} 条待确认` : '通过'}
+                      // 只有史实疑点必须处理（橙色）；押韵、字数是建议（灰色），可采纳可不理
+                      <span
+                        key={k}
+                        className={v.pending && v.blocking ? 'tag-human' : 'tag'}
+                        title={v.blocking ? '史实疑点必须处理后才能确认歌词' : '风格建议：可采纳，也可以不处理'}
+                      >
+                        {CHECK_TYPE_LABEL[k]} {v.pending ? (v.blocking ? `${v.pending} 条待确认` : `${v.pending} 条建议`) : '通过'}
                       </span>
                     ))}
                   {summary.state === 'checking' && <span className="tag-brand">检查中…</span>}
@@ -577,16 +582,35 @@ export default function LyricsPage() {
                 <Empty text="三项检查均未发现疑点" />
               ) : (
                 <div className="flex flex-col gap-2.5">
-                  {checks.map((c) => (
+                  <div className="flex items-center gap-2 text-[11px] text-ink-soft">
+                    <span className="flex-1">
+                      只有<b>史实</b>疑点必须处理（事实错误会直接影响文旅内容的可信度）；押韵和字数是建议，可以采纳，也可以不管。
+                    </span>
+                    {canEditLyrics && checks.filter((c) => c.type === 'fact' && c.status === 'pending').length > 1 && (
+                      <button
+                        className="btn btn-sm shrink-0"
+                        disabled={!!busy}
+                        title="逐条看过都没问题时，用同一个理由一次保留全部史实疑点"
+                        onClick={() => {
+                          setKeepFor({ batch: true, text: `全部 ${checks.filter((c) => c.type === 'fact' && c.status === 'pending').length} 条史实疑点` })
+                          setKeepReason('已逐条人工查证属实')
+                        }}
+                      >
+                        全部保留史实疑点…
+                      </button>
+                    )}
+                  </div>
+                  {[...checks].sort((a, b) => Number(b.type === 'fact' && b.status === 'pending') - Number(a.type === 'fact' && a.status === 'pending')).map((c) => (
                     <div
                       key={c.id}
                       className={clsx(
                         'border rounded-btn p-3',
-                        c.status === 'pending' ? 'border-human/40 bg-human-soft/35' : 'border-line bg-white',
+                        c.status === 'pending' && c.type === 'fact' ? 'border-human/40 bg-human-soft/35' : 'border-line bg-white',
                       )}
                     >
                       <div className="flex items-center gap-2">
-                        <span className={c.status === 'pending' ? 'tag-human' : 'tag'}>{CHECK_TYPE_LABEL[c.type]}</span>
+                        <span className={c.status === 'pending' && c.type === 'fact' ? 'tag-human' : 'tag'}>{CHECK_TYPE_LABEL[c.type]}</span>
+                        {c.status === 'pending' && c.type !== 'fact' && <span className="tag" title="风格建议，不处理也能确认歌词">建议 · 可不处理</span>}
                         {c.type === 'fact' && c.kb_entry_ids?.length > 0 && (
                           <span className="tag-brand" title="依据来自已核实的知识库条目">有出处</span>
                         )}
@@ -634,7 +658,7 @@ export default function LyricsPage() {
                               setKeepReason(c.needs_manual ? '已人工查证属实' : '')
                             }}
                           >
-                            保留原文…
+                            {c.type === 'fact' ? '保留原文…' : '不改，标记已看过…'}
                           </button>
                           {(c.suggestions || []).length === 0 && (
                             <span className="text-[10px] text-ink-faint">没有合格的改写建议，可直接在上方编辑该行后保存</span>
@@ -1042,6 +1066,10 @@ export default function LyricsPage() {
                 act(
                   'keep',
                   async () => {
+                    if (keepFor.batch) {
+                      await api.keepAllChecks(p.id, keepReason.trim())
+                      return
+                    }
                     await api.keepCheck(keepFor.id, keepReason.trim())
                     if (keepToKb)
                       await api.kbFromCheck(keepFor.id, {

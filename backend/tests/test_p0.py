@@ -944,3 +944,43 @@ def test_controlled_vocabulary(client, has_real_db):
         db.query(AssetTag).filter(AssetTag.asset_id == aid).delete()
         db.query(Asset).filter(Asset.id == aid).delete()
         db.commit()
+
+
+def test_only_fact_checks_block(client, has_real_db):
+    """只有史实疑点拦确认；押韵 / 字数是建议。自相矛盾的史实疑点丢弃；史实可一键全部保留。"""
+    from app import gates
+    from app.db import SessionLocal
+    from app.models import LyricCheck, LyricVersion, Project
+    from app.services import lyrics as L
+
+    assert L._self_contradictory("曲院风荷旁冷饮摊沁出凉香", "名称错误，应为‘曲院风荷’，属字形错误")
+    assert not L._self_contradictory("雷锋塔影斜斜印在裙边", "应为‘雷峰塔’，‘锋’字错误")
+
+    with SessionLocal() as db:
+        p = Project(name="测试·检查闸门", destination="x", status="lyric_review")
+        db.add(p)
+        db.flush()
+        v = LyricVersion(project_id=p.id, version=1, sections=[], source="ai", checks_done=True)
+        db.add(v)
+        db.flush()
+        mk = lambda t, i: LyricCheck(lyric_version_id=v.id, project_id=p.id, type=t, section="主歌1",  # noqa: E731
+                                     line_no=i, text=f"句子{i}", status="pending")
+        db.add_all([mk("rhyme", 1), mk("meter", 2)])
+        db.commit()
+        pid = p.id
+        assert gates.check(db, p).ok                      # 只有建议：不拦
+        db.add_all([mk("fact", 3), mk("fact", 4)])
+        db.commit()
+        g = gates.check(db, p)
+        assert not g.ok and "2 条史实疑点" in g.reasons[0]
+        s = L.check_summary(L.checks_of(db, v.id), v)
+        assert s["blocking"] == 2 and s["pending"] == 4 and s["by_type"]["rhyme"]["blocking"] is False
+
+    assert client.post(f"/api/projects/{pid}/lyrics/checks/keep-all", json={"reason": ""}).status_code == 400
+    assert client.post(f"/api/projects/{pid}/lyrics/checks/keep-all", json={"reason": "已逐条查证"}).json() == {"kept": 2}
+    with SessionLocal() as db:
+        assert gates.check(db, db.get(Project, pid)).ok
+        for t in (LyricCheck, LyricVersion):
+            db.query(t).filter(t.project_id == pid).delete()
+        db.query(Project).filter(Project.id == pid).delete()
+        db.commit()

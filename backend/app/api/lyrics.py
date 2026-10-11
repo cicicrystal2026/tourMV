@@ -122,6 +122,17 @@ def _check_project(db: Session, check_id: str) -> str:
     return c.project_id
 
 
+@router.post("/projects/{project_id}/lyrics/checks/keep-all")
+def keep_all(project_id: str, payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
+    """一键保留全部待处理的史实疑点（统一理由）。"""
+    try:
+        _require_lyric_stage(db, project_id)
+        n = svc.keep_all(db, project_id, str(payload.get("reason") or ""), str(payload.get("type") or "fact"))
+    except ProjectError as e:
+        _fail(e)
+    return {"kept": n}
+
+
 @router.post("/lyrics/checks/{check_id}/adopt")
 def adopt(check_id: str, payload: dict = Body(default={}), db: Session = Depends(get_db)) -> dict:
     try:

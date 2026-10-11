@@ -66,9 +66,11 @@ def check(db: Session, p: Project) -> Gate:
         else:
             rows = list(db.execute(select(LyricCheck).where(
                 LyricCheck.lyric_version_id == ver.id)).scalars())
-            pending = [r for r in rows if r.status == "pending"]
+            # 只有史实疑点必须处理：事实错误是文旅内容的真风险。
+            # 押韵、字数是风格建议，可采纳可忽略 —— V1.1 要求逐条处理，运营反馈人工成本太高
+            pending = [r for r in rows if r.status == "pending" and r.type == "fact"]
             if pending:
-                g.fail(f"还有 {len(pending)} 条疑点未处理（逐条「采纳」或「保留原文」）")
+                g.fail(f"还有 {len(pending)} 条史实疑点未处理（「采纳」或「保留原文」，可一键全部保留）")
             kept_no_reason = [r for r in rows if r.status == "kept" and not (r.keep_reason or "").strip()]
             if kept_no_reason:
                 g.fail(f"{len(kept_no_reason)} 条「保留原文」缺少理由")

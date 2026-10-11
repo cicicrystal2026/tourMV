@@ -125,6 +125,27 @@ def _filter(sugs: list, original: str) -> list[str]:
     return out[:3]
 
 
+# 必须处理才能确认歌词的疑点类型；其余（押韵、字数）只是建议
+BLOCKING_TYPES = ("fact",)
+
+_QUOTED = r"[‘'「“\"]([^’'」”\"]{2,12})[’'」”\"]"
+
+
+def _self_contradictory(text: str, evidence: str) -> bool:
+    """史实疑点自相矛盾：模型说「应为『X』」，而 X 本来就原样写在歌词里。
+
+    实测：歌词是「曲院风荷」，模型报「名称错误，应为『曲院风荷』」—— 四个字一模一样。
+    这种疑点让人去核实纯属浪费，直接丢弃。
+    """
+    import re
+
+    line = _norm_line(text)
+    for m in re.finditer(r"(?:应为|应是|应作|应写作|标准名称是|标准名称为|正确(?:名称|写法)?(?:是|为)?)\s*" + _QUOTED, evidence or ""):
+        if _norm_line(m.group(1)) and _norm_line(m.group(1)) in line:
+            return True
+    return False
+
+
 def run_checks(db: Session, ver: LyricVersion, real: bool = True) -> list[LyricCheck]:
     proj = db.get(Project, ver.project_id)
     destination = proj.destination if proj else ""
@@ -172,8 +193,16 @@ def run_checks(db: Session, ver: LyricVersion, real: bool = True) -> list[LyricC
                 continue
             if 0 <= idx < len(kb_ids) and kb_ids[idx] not in cited:
                 cited.append(kb_ids[idx])
+        ev = str(it.get("evidence") or "")
+        if it["type"] == "fact":
+            if _self_contradictory(actual, ev):
+                continue          # 自相矛盾的史实疑点不拿去麻烦人
+            if ev.lstrip("【】需人工核实·知识库无出处 ").startswith("同上") and issues and issues[-1]["type"] == "fact":
+                # 「同上」= 和上一条是同一个问题出现在另一行：并进上一条，处理一次全部生效
+                issues[-1].setdefault("_also", []).append(f"{key[0]}第{key[1]}行")
+                continue
         issues.append({"type": it["type"], "section": key[0], "line_no": key[1], "text": actual,
-                       "evidence": str(it.get("evidence") or ""), "kb": cited,
+                       "evidence": ev, "kb": cited,
                        "suggestions": _filter(it.get("suggestions") or [], actual)})
 
     # 同一句话同一类型只留一条：副歌复唱的句子文本完全一样，
@@ -239,8 +268,12 @@ def check_summary(rows: list[LyricCheck], ver: LyricVersion | None = None) -> di
     by_type: dict[str, dict] = {}
     for t in ("rhyme", "meter", "fact"):
         grp = [r for r in rows if r.type == t]
-        by_type[t] = {"total": len(grp), "pending": len([r for r in grp if r.status == "pending"])}
-    return {"state": "done", "total": len(rows), "pending": len(pending), "by_type": by_type}
+        by_type[t] = {"total": len(grp), "pending": len([r for r in grp if r.status == "pending"]),
+                      # blocking：必须处理才能确认歌词的类型（目前只有史实）
+                      "blocking": t in BLOCKING_TYPES}
+    blocking = len([r for r in pending if r.type in BLOCKING_TYPES])
+    return {"state": "done", "total": len(rows), "pending": len(pending), "blocking": blocking,
+            "by_type": by_type}
 
 
 # ------------------------------------------------------------------ 编辑
@@ -357,6 +390,22 @@ def keep_original(db: Session, check_id: str, reason: str) -> LyricCheck:
     c.keep_reason = reason[:500]
     db.commit()
     return c
+
+
+def keep_all(db: Session, project_id: str, reason: str, type_: str = "fact") -> int:
+    """一键保留某一类全部待处理疑点（统一理由）。给「逐条查过都没问题」的场景用。"""
+    _editable(db, project_id)
+    reason = (reason or "").strip()
+    if len(reason) < 2:
+        raise ProjectError("保留原文需要填写理由（例如：已逐条查证属实）")
+    ver = latest(db, project_id)
+    n = 0
+    for c in (checks_of(db, ver.id) if ver else []):
+        if c.status == "pending" and (not type_ or c.type == type_):
+            c.status, c.keep_reason = "kept", reason[:500]
+            n += 1
+    db.commit()
+    return n
 
 
 def resolve_check(db: Session, check_id: str, reason: str = "") -> LyricCheck:
