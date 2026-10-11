@@ -84,7 +84,7 @@ def _queue_reembed_if_needed(db) -> None:
         db.commit()
 
 
-app = FastAPI(title="文旅MV生产管线 V1.0", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="文旅MV生产管线 V1.1", version="1.1.0", lifespan=lifespan)
 
 # 访问控制先加、CORS 后加：Starlette 里后加的中间件在外层，
 # 这样 401 响应也会带上 CORS 头，本地 5173 开发时前端能读到「需要登录」。

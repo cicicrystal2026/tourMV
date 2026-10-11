@@ -22,7 +22,7 @@ export default function Sidebar({ info, online }: { info: any; online: boolean |
     <aside className="w-[224px] shrink-0 bg-sidebar text-white/85 flex flex-col h-screen sticky top-0">
       <div className="px-5 pt-6 pb-5">
         <div className="font-serif text-[16px] text-white leading-snug">文旅MV</div>
-        <div className="text-[11px] text-white/40 mt-0.5">生产管线 V1.0 · 实验室</div>
+        <div className="text-[11px] text-white/40 mt-0.5">生产管线 V1.1 · 实验室</div>
       </div>
 
       <nav className="px-3 flex flex-col gap-0.5">
