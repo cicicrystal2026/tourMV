@@ -1,0 +1,8 @@
+# shell 脚本必须保持 LF。
+#
+# 为什么：Windows 上 core.autocrlf=true 会在检出时把文本文件转成 CRLF，
+# 而脚本首行 `#!/usr/bin/env bash` 带上 \r 后会找不到解释器 ——
+# 表现为脚本不执行或静默退出，排查成本很高（本项目踩过一次）。
+#
+# 只约束脚本，不做全局 `* text=auto`，避免给存量文件制造大量无谓 diff。
+*.sh text eol=lf

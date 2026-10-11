@@ -40,7 +40,7 @@
 
 4. **创建 API Key**
    火山方舟控制台 → 左侧「**API Key 管理**」→「**创建 API Key**」→ 复制整串值
-   （形如 `api-key-20261011xxxxxx`）。
+   （实测形如 `ark-4850e1…`，共 46 字符；前缀以控制台实际生成的为准）。
 
    > ⚠️ **最容易踩的坑**：这里要的是方舟的 **API Key**，
    > **不是** IAM 里的 AccessKey / SecretKey（AK/SK）。
@@ -65,7 +65,7 @@
 编辑 `wenlv-mv/.env`，加两行（文件里已有注释占位，去掉 `#` 填值即可）：
 
 ```ini
-ARK_API_KEY=api-key-你复制到的那一串
+ARK_API_KEY=你复制到的那一串
 
 # 可选：默认已内置 5.0 flash，账号开通的是 pro / 4.0 时在这里覆盖
 # SEEDREAM_IMAGE_MODEL=doubao-seedream-5-0-flash-260915
@@ -94,7 +94,7 @@ Seedream 会**分三步发请求**（最小请求 → 加尺寸 → 完整参数
 模型 ID 问题 / 参数问题」分开暴露；成功后落一张样图到 `data/_probe_t2i/`：
 
 ```
-【步骤 1】检查凭证    ✅ 已读到 Key：api-key-…（长度 44）
+【步骤 1】检查凭证    ✅ 已读到 Key：ark-…（长度 46）
 【步骤 2】最小请求    ✅ [最小请求] HTTP 200
 【步骤 3】带尺寸请求  ✅ [完整请求] HTTP 200
 ✅ 全部通过  最终尺寸=2560x1440  耗时=13.8s  体积=1180KB
@@ -160,7 +160,7 @@ IMAGE_PROVIDER=jimeng
 
 | 报错 | 原因 | 处理 |
 |---|---|---|
-| **401** | Key 类型不对。把 AK/SK 当成 Bearer 用了 | 改用方舟「API Key 管理」里的 `api-key-xxx` |
+| **401** | Key 类型不对。把 AK/SK 当成 Bearer 用了 | 改用方舟「API Key 管理」创建的 API Key |
 | **404** | 模型 ID 不存在或未开通 | 方舟控制台确认已开通，把 ID 抄进 `SEEDREAM_IMAGE_MODEL` |
 | **403** | 未实名认证 / 未开通该服务 | 完成人脸实名 + 在「开通管理」里开通 |
 | **400** | 参数不被接受。5.0 最常见的是 size 写法混用，或误传了组图/流式参数 | 尺寸在「档位词」与「宽x高」中**二选一**（16:9 传 `2560x1440`）；不要传 `sequential_image_generation` / `stream` |
