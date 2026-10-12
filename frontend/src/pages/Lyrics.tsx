@@ -461,8 +461,11 @@ export default function LyricsPage() {
                     disabled={!!busy}
                     title="整首重写（会生成新版本并重新检查）"
                     onClick={() =>
-                      act('gen', () => api.generateLyrics(p.id, true), () => {
+                      // 异步：接口立刻返回，项目进入「写词中」，页面按 4 秒轮询取结果。
+                      // 以前这里是同步等待，写词要十几到几十秒，经边缘网关必超时（504）。
+                      act('gen', () => api.generateLyrics(p.id), () => {
                         setDirty(false)
+                        setMsg('已开始重新生成歌词，写完会自动刷新')
                         loadAll(p.id)
                       })
                     }

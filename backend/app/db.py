@@ -1,6 +1,7 @@
 """SQLAlchemy 会话与引擎。SQLite 起步，预留 PostgreSQL 迁移（改 DATABASE_URL 即可）。"""
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -9,6 +10,8 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import settings
+
+log = logging.getLogger("wenlv.db")
 
 _s = settings()
 
@@ -67,8 +70,15 @@ def init_db() -> None:
 
     models.Base.metadata.create_all(engine)
     added = _add_missing_columns()
-    _backfill_v11(added)
-    _selfheal()
+    # 回填 / 自愈是「修存量数据」的收尾工作，不该有否决启动的权力。
+    # 2026-10-12 踩过：发布时数据库文件正被旧进程占用，回填读到中途报错，
+    # 整个服务起不来（线上直接 504，且是启动即崩的死循环）。
+    # 表结构由 create_all + _add_missing_columns 保证，这两步失败只记日志。
+    for step, fn in (("数据回填", lambda: _backfill_v11(added)), ("启动自愈", _selfheal)):
+        try:
+            fn()
+        except Exception as e:  # noqa: BLE001
+            log.warning("%s 失败（不影响启动，可稍后重跑）：%s", step, e)
 
 
 def _selfheal() -> None:

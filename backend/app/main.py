@@ -55,8 +55,14 @@ async def lifespan(app: FastAPI):
 
     # 加载 Chinese-CLIP（首次还要下载权重）可能要几十秒，放后台线程，不拖慢启动
     import threading
+    import time
 
     def _bg_reembed() -> None:
+        # 先等一会儿：向量重建是 CPU 密集的，部署完立刻打开页面正好会撞上它，
+        # 请求被拖到网关超时（用户侧表现为 504）。先把 HTTP 服务让出来。
+        delay = s.reembed_start_delay_s
+        if delay:
+            time.sleep(delay)
         try:
             with session_scope() as db2:
                 _queue_reembed_if_needed(db2)
@@ -84,7 +90,7 @@ def _queue_reembed_if_needed(db) -> None:
         db.commit()
 
 
-app = FastAPI(title="文旅MV生产管线 V1.1", version="1.1.4", lifespan=lifespan)
+app = FastAPI(title="文旅MV生产管线 V1.1", version="1.1.5", lifespan=lifespan)
 
 # 访问控制先加、CORS 后加：Starlette 里后加的中间件在外层，
 # 这样 401 响应也会带上 CORS 头，本地 5173 开发时前端能读到「需要登录」。

@@ -79,6 +79,18 @@ class _ClipEncoder:
             import torch  # noqa: F401
             from transformers import ChineseCLIPModel, ChineseCLIPProcessor
 
+            # 后台向量重建与 Web 请求共用一个进程：torch 默认吃满所有核心，
+            # 会把接口响应从 1~2 秒拖到十几秒（边缘网关 12 秒读超时 → 504）。
+            n = settings().clip_torch_threads
+            try:
+                torch.set_num_interop_threads(1)   # 必须在首次并行计算前调用
+            except Exception:                      # 已并行后再调会抛，忽略
+                pass
+            try:
+                torch.set_num_threads(n)
+            except Exception:
+                pass
+
             name = settings().clip_model
             self._proc = ChineseCLIPProcessor.from_pretrained(name)
             self._model = ChineseCLIPModel.from_pretrained(name).eval()

@@ -7,10 +7,11 @@ from sqlalchemy.orm import Session
 from .. import serialize as S
 from .. import state_machine as sm
 from ..db import get_db
+from ..queue import enqueue
 from .deps import guard_locked
 from ..models import LyricCheck
 from ..services import lyrics as svc
-from ..services.projects import ProjectError, get as get_project
+from ..services.projects import ProjectError, get as get_project, set_state
 
 router = APIRouter(prefix="/api", tags=["lyrics"], dependencies=[Depends(guard_locked)])
 
@@ -56,13 +57,32 @@ def get_lyrics(project_id: str, db: Session = Depends(get_db)) -> dict:
 
 @router.post("/projects/{project_id}/lyrics/generate")
 def generate_lyrics(project_id: str, sync: bool = False, db: Session = Depends(get_db)) -> dict:
-    """在「待确认歌词」阶段整首重写（同步）。首次写词请走「确认简报」推进，由后台任务完成。"""
+    """在「待确认歌词」阶段整首重写。
+
+    默认**异步**：置为「写词中」并交给后台队列，立刻返回，前端轮询取结果。
+    写词要调 LLM（10~40 秒），同步等会顶穿网关/边缘的超时预算 ——
+    用户看到的是 504 和「点了没反应」，而后台其实写成功了。
+    与「确认简报」走的是同一个 `lyric_generate` 任务，逻辑不重复。
+    `?sync=true` 保留同步实现，供脚本与排查使用。
+    """
     try:
         _require_lyric_stage(db, project_id)
+        if not sync:
+            return _start_generate(db, project_id)
         ver, real = svc.generate(db, project_id)
     except ProjectError as e:
         _fail(e)
     return {"mode": "sync", "lyric": S.lyric(ver), "llm": real}
+
+
+def _start_generate(db: Session, project_id: str) -> dict:
+    """把整首重写丢给后台队列。"""
+    p = get_project(db, project_id)
+    # set_state 内部会 commit，并记一次人工节点的进出（工时统计）
+    set_state(db, p, "lyric_generating")
+    job = enqueue(db, "lyric_generate", project_id=p.id, ref_id=p.id, name="重新生成歌词")
+    db.commit()
+    return {"mode": "async", "job_id": job.id, "status": p.status}
 
 
 @router.post("/projects/{project_id}/lyrics/check")

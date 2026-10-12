@@ -98,6 +98,10 @@ class Settings:
         self.vlm_api_key = os.environ.get("VLM_API_KEY", "")
         self.vlm_model = os.environ.get("VLM_MODEL", "qwen3-vl-plus")   # qwen-vl-plus 已被平台下线
         self.clip_model = os.environ.get("CLIP_MODEL", "OFA-Sys/chinese-clip-vit-base-patch16")
+        # torch 默认吃满所有 CPU 核心。素材向量重建跑在后台线程里，
+        # 一旦占满核心，Web 请求抢不到时间片 —— 单次 GET 会从 1~2 秒劣化到十几秒，
+        # 经边缘网关转发就是 504。这里把编码线程数收窄（调大=重建更快但更卡）。
+        self.clip_torch_threads = max(1, int(os.environ.get("CLIP_TORCH_THREADS", "2")))
         # 实拍镜头「合格」的匹配分阈值（PRD V1.1 F6-2，标定后的 0–1 分）
         self.match_threshold = float(os.environ.get("MATCH_THRESHOLD", "0.6"))
         # 歌词强制对齐：auto（有 faster-whisper 就用，否则估算）| whisper（强制用）| analytic（关闭）
@@ -111,6 +115,10 @@ class Settings:
         # 队列并发（PRD §10.1：api 4 / gpu 1）
         self.api_concurrency = int(os.environ.get("API_CONCURRENCY", "4"))
         self.gpu_concurrency = int(os.environ.get("GPU_CONCURRENCY", "1"))
+        # 启动后多久再做「素材向量重建」检查。重建是 CPU 密集的，
+        # 部署完立刻访问页面正好会撞上它（请求被拖到网关超时 → 504），
+        # 所以先让 HTTP 服务跑顺了再开始。设 0 表示立即执行。
+        self.reembed_start_delay_s = max(0, int(os.environ.get("REEMBED_START_DELAY_S", "60")))
 
         # 运行模式：mock 时所有外部调用走本地假实现
         self.force_mock = os.environ.get("FORCE_MOCK", "1") == "1"

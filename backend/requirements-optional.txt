@@ -16,5 +16,5 @@ pillow>=10.0
 # 歌词逐句对齐（任选其一，并设置 ALIGN_ENGINE）
 # whisperx>=3.3
 # funasr>=1.1
-# 出片自检抽帧 OCR（PRD F3-10，核对字幕是否烧录、时间是否对得上；ONNX，无需 torch）
-rapidocr>=3.0
+# 出片自检抽帧 OCR —— **已移入 requirements.txt**。
+# 它是交付闸门（字幕）的必需依赖，不再是可选项，见那边注释。

@@ -1,0 +1,54 @@
+{
+  "song": "天津·海河夜航",
+  "artist": "（原创·无参考曲）",
+  "why_hot": "文旅二创立项：以海河夜游为叙事主线，串联五大道、意式风情区、天津之眼、古文化街等城市地标",
+  "elements": {
+    "genre": "华语情感抒情（mandopop cinematic ballad）+ 津味城市民谣",
+    "subgenre": "文旅城市主题曲 / 影视质感抒情",
+    "bpm": "78-88",
+    "key_mode": "大调为主，副歌转明亮；桥段借关系小调制造乡愁",
+    "time_feel": "half-time feel（中慢板）",
+    "structure": "intro-verse-prechorus-chorus-verse2-chorus-bridge-chorus-outro；hook 在第 25 秒前出现",
+    "length": "120 秒（短视频版）",
+    "instrumentation": ["弦乐组", "手风琴（意风区欧陆色）", "口琴/竹笛点缀", "钢琴", "轻打击", "和声垫"],
+    "vocal_style": "真声主唱，副歌叠和声；不模仿任何特定歌手音色",
+    "production_traits": ["宽阔混响", "克制低频", "留白编排", "副歌强可唱性"],
+    "mood": ["辽阔", "乡愁", "温柔", "市井烟火气", "夜色浪漫"],
+    "energy": "mid",
+    "lyric_theme": "以海河夜航串联城市记忆：码头、桥、洋楼、早点摊、相声茶馆；写「离开与回来」的乡愁（不引用任何原歌词句式）",
+    "language": "zh（中文演唱 + 英文字幕）",
+    "mv_visual_style": "夜航视角为主：海河游船推进镜头 + 五大道梧桐洋楼 + 意风区暖灯 + 天津之眼摩天轮仰拍 + 古文化街市井特写；色调深蓝夜色 + 暖黄灯串",
+    "place_or_culture_elements": "天津·海河夜景／五大道／意式风情区／天津之眼（永乐桥）／古文化街／杨柳青年画／相声茶馆／煎饼果子·锅巴菜市井烟火",
+    "confidence": {
+      "genre": "inferred",
+      "bpm": "inferred",
+      "place_or_culture_elements": "inferred",
+      "mood": "inferred"
+    }
+  },
+  "remix_card": {
+    "borrowable": [
+      "中慢板抒情 + 副歌叠和声的可唱结构",
+      "弦乐铺底 + 手风琴点缀的「夜航」氛围",
+      "城市夜景与市井烟火双线画面切换",
+      "短前奏（≤8 秒）直接起唱，适配短视频"
+    ],
+    "style_prompt": "mandopop cinematic ballad, tianjin city night cruise theme, warm nostalgic tone, 82 bpm, 4/4 half-time feel, string section as backbone with accordion and harmonica accents, piano and light percussion, sincere lead vocal with harmony layers on chorus, wide reverb, restrained low end, spacious arrangement, strong singable chorus, folk-pop warmth, very short intro under 8 seconds",
+    "lyric_angles_for_wenlv": [
+      "以海河游船为第一视角：从永乐桥出发，桥、灯、洋楼依次入镜，写「城市在夜色里慢下来」",
+      "以「早点摊—茶馆—码头」三段市井记忆写乡愁，落点在海河水面倒影",
+      "以「走了很多城市，还是回了天津」写归属感，副歌用城市名做落点"
+    ],
+    "visual_ideas": [
+      "天津之眼摩天轮仰拍 + 海河游船尾浪，做开场 8 秒强钩子",
+      "五大道梧桐落叶与洋楼百叶窗的特写蒙太奇（暖色）",
+      "意风区夜灯下的手风琴手 + 古文化街年画拓印，冷暖对切"
+    ],
+    "avoid": [
+      "不得使用任何原曲旋律走向",
+      "不得复述原歌词句式",
+      "不得采样标志性乐器动机",
+      "不得模仿特定歌手音色"
+    ]
+  }
+}

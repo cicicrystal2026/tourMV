@@ -23,3 +23,11 @@ faster-whisper>=1.1
 # 繁简归一化：Whisper 的中文输出常是繁体，不转换会让字符匹配大面积落空
 opencc-python-reimplemented>=0.1.7
 pypinyin>=0.50          # 规则押韵检查按韵母比较
+
+# 出片自检抽帧 OCR（PRD F3-10：核对字幕是否烧录、时间对不对得上）。
+# **必须装在核心依赖里**：字幕是文旅交付要件，而「出片自检」把它当硬闸门 ——
+# 缺了它 qc.ok=False，render_all 抛错，项目永远停在「待精炼」，交付直接卡死。
+# 它是 ONNX 推理（自带 onnxruntime），不拖 torch。
+# 原先只写在 requirements-optional.txt，而发布只装 requirements.txt
+# → 线上必然缺失（2026-10-12 线上实测复现：qc=['…：字幕'] failed）。
+rapidocr>=3.0
