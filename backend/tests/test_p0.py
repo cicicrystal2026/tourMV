@@ -787,20 +787,34 @@ def test_align_failure_is_not_silent(monkeypatch):
 
 
 def test_static_ai_shot_split_and_beat_snap():
-    """F3-2：AI 静态画面单段 ≤ 8 秒（拆段取不同景别），切点吸附最近强拍。"""
+    """F3-2：AI 静态画面单段 ≤ MAX_STATIC_S（拆段取不同景别），切点吸附最近强拍。"""
     from types import SimpleNamespace
 
+    from app.adapters import media
     from app.services import edit
+
+    # 运镜参数必须成对：预放大要盖得住最大放大倍率，否则 zoom 越大画面越糊
+    assert media.PRE_SCALE >= 1 + media.PUSH_AMOUNT, "PRE_SCALE 必须 >= 1 + PUSH_AMOUNT"
+    # 幅度要够大，否则不同时间窗之间看不出景别差（旧值 0.10 就是这个 bug）
+    assert media.PUSH_AMOUNT >= 0.30
 
     ai = SimpleNamespace(source="ai", duration_s=20.0)
     beats = [i * 1.0 for i in range(20)]           # 每 1 秒一个强拍（拆分点离强拍都 ≤ 0.5 秒）
     parts = edit._split_static({"asset": ai, "start": 0.0, "end": 19.0}, (beats, beats))
-    assert len(parts) == 3 and all(p["end"] - p["start"] <= 8.0 + 0.5 for p in parts)
+    assert len(parts) == 5
+    assert all(p["end"] - p["start"] <= edit.MAX_STATIC_S + 0.5 for p in parts)
     assert all(p["start"] in beats for p in parts[1:])        # 拆分点落在强拍上
     assert parts[0]["window"] == 0.0 and parts[-1]["window"] == 1.0
 
     shot = SimpleNamespace(source="shot", duration_s=20.0)
     assert len(edit._split_static({"asset": shot, "start": 0.0, "end": 19.0}, (beats, beats))) == 1
+    # 短句不拆：4 秒以内保持单镜，拆了会变成 1 秒一闪
+    assert len(edit._split_static({"asset": ai, "start": 0.0, "end": 3.2}, (beats, beats))) == 1
+    # 切点被吸附到同一强拍时不能产出 0 秒片段
+    flat = [0.0, 4.0]                              # 强拍只有两个，5 个切点会挤在一起
+    safe = edit._split_static({"asset": ai, "start": 0.0, "end": 19.0}, (flat, flat))
+    assert all(p["end"] - p["start"] > 0 for p in safe)
+    assert sum(p["end"] - p["start"] for p in safe) == 19.0
     # 强拍太远时退到普通拍
     assert edit._snap(([0.0, 4.0], [0.0, 1.0, 2.0, 3.0, 4.0]), 2.2) == 2.0
     assert edit._snap(([0.0, 4.0], [0.0, 1.0, 2.0, 3.0, 4.0]), 3.7) == 4.0

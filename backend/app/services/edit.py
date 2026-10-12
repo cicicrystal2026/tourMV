@@ -24,8 +24,13 @@ SCENE_BATCH = 12
 # 超了就从「首句人声前 INTRO_LEAD_S 秒」处起播，留一点进入感，并做淡入。
 MAX_INTRO_S = 3.0
 INTRO_LEAD_S = 1.5
-# PRD V1.1 F3-2：单个静态 AI 镜头连续时长上限；切点吸附到最近强拍的最大挪动距离
-MAX_STATIC_S = 8.0
+# PRD V1.1 F3-2：单个 AI 静态镜头连续时长上限；切点吸附到最近强拍的最大挪动距离
+#
+# 2026-10-12 由 8.0 收到 4.0：8 秒的阈值意味着 5~7 秒的句子永远不会被拆，
+# 观众看到的就是「一张图挂到底」。收到 4.0 后，典型 5.7 秒的句子会拆成两个
+# 约 2.85 秒的镜头（取素材不同时间窗 → 远景区别递进，见 media.PUSH_AMOUNT）。
+# 低于 4 秒的短句仍保持单镜 —— 再拆会变成 1 秒一闪，反而更碎。
+MAX_STATIC_S = 4.0
 SNAP_WINDOW_S = 0.5
 
 
@@ -316,8 +321,15 @@ def _nearest(points: list[float], t: float, window: float) -> float | None:
 def _split_static(it: dict, strong_beats: tuple[list[float], list[float]]) -> list[dict]:
     """AI 生成的静态画面单段超过 MAX_STATIC_S 时拆成几段（F3-2）。
 
-    每段取同一条推镜头素材的不同时间窗（第 1 段取开头的远景、最后一段取结尾的近景），
-    剪出来是「同一景点、景别递进」的跳切，而不是 12 秒盯着一张图慢慢放大。
+    拆段的意义：一个 5~7 秒的镜头只推近 7%，画面变化太慢，看久了是 PPT。
+    拆成 2 段后，每段取同一条推镜头素材的**不同时间窗**（第 1 段取开头的远景、
+    最后一段取结尾的近景）—— 因为素材本身是按整条时长推镜的，
+    时间窗就等于景别进度，剪出来是「同一景点、景别递进」的跳切。
+
+    ⚠️ 这条链路依赖 `media.image_to_clip` 的推镜幅度足够大（现为 `PUSH_AMOUNT=0.50`）。
+    幅度只有 0.10 时两个窗口之间差不到 3%，等于拆了也看不出区别 —— 2026-10-12 前的
+    实现就是这个状态，机制形同虚设。
+
     实拍素材本身有运动，不拆。拆分点同样尽量落在强拍上。
     """
     a: Asset = it["asset"]
@@ -327,15 +339,24 @@ def _split_static(it: dict, strong_beats: tuple[list[float], list[float]]) -> li
         return [{"start": start, "end": end}]
     import math
 
-    n = math.ceil(dur / MAX_STATIC_S)
-    cuts = [start + dur * k / n for k in range(1, n)]
-    snapped = []
+    cuts = [start + dur * k / math.ceil(dur / MAX_STATIC_S)
+            for k in range(1, math.ceil(dur / MAX_STATIC_S))]
+    snapped: list[float] = []
     for c in cuts:
         t = _snap(strong_beats, c) if strong_beats and strong_beats[1] else None
         snapped.append(t if t is not None else round(c, 3))
-    bounds = [start, *snapped, end]
-    return [{"start": bounds[k], "end": bounds[k + 1], "window": (k / (n - 1)) if n > 1 else 0.0}
-            for k in range(n)]
+
+    # 防呆：吸附后可能把两个切点并到一起（强拍密集时），那样会产出 0 秒片段
+    MIN_SEG_S = 0.8
+    safe: list[float] = []
+    for t in snapped:
+        prev = safe[-1] if safe else start
+        if t - prev >= MIN_SEG_S and end - t >= MIN_SEG_S:
+            safe.append(t)
+    bounds = [start, *safe, end]
+    n = len(bounds) - 1
+    return [{"start": bounds[k], "end": bounds[k + 1],
+             "window": (k / (n - 1)) if n > 1 else 0.0} for k in range(n)]
 
 
 def _real_pool(assets: list[Asset], destination: str = "") -> list[Asset]:

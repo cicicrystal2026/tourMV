@@ -3,10 +3,33 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 
 import requests
+
+# ---------------------------------------------------------------- 运镜参数
+# ⚠️ 这两个值必须成对设计，改动前先读下面的推导（2026-10-12 修过一次 PPT 感）：
+#
+# 旧实现 `amount = 0.10` 且步长按**整条 20 秒素材**摊算（`rate = amount / 500 帧`），
+# 而每个镜头实际只用到 4~6 秒 → 真正落在画面里的推近只有 **2.8%**，
+# 肉眼完全看不出运动，成片表现为「一张静图挂 5 秒」的 PPT 感。
+# 连带 `edit._split_static()` 的「同景点远景→近景」景别递进也从未生效
+# （两个时间窗之间差不到 3%）。
+#
+# 现在：
+#   1. 幅度提到 0.50 → 3 秒的镜头也有约 7% 变化（≈2.5%/秒），推镜看得见；
+#   2. 不同时间窗之间因此产生 40%+ 的景别差，_split_static 的递进才真正成立；
+#   3. **幅度一大就必须预放大**：zoompan 是从原图取一小块再缩放到输出尺寸，
+#      zoom=1.5 时取的区域只有输出的 1/1.5。先在 PRE_SCALE 倍尺寸上 zoompan
+#      再输出目标尺寸，就能保证全程取到 1:1 原生像素、不发糊。
+#      **约束：PRE_SCALE >= 1 + PUSH_AMOUNT**（1.5 >= 1.5 ✓）。
+#
+# 实测代价（20 秒片段 / 1920×1080 / veryfast）：2.2s → 2.9s，17 句多花约 12 秒，可忽略。
+# 别再往上加 —— 2 倍（3840×2160）是纯浪费。
+PUSH_AMOUNT = float(os.environ.get("PUSH_AMOUNT", "0.50"))
+PRE_SCALE = 1.5
 
 
 def run(cmd: list[str], timeout: int = 600) -> subprocess.CompletedProcess:
@@ -194,18 +217,14 @@ def image_to_clip(img: str | Path, out_mp4: str | Path, *, seconds: float = 8.0,
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
     frames = max(2, int(seconds * fps))
     if zoom:
-        # zoompan 的 1920x1080 输出直接就是目标尺寸。
-        # 注意不要在它之前再放大 —— 曾经写成 scale 到 2 倍再 zoompan，
-        # 每帧要处理 3840x2160，6 张图要跑好几分钟。zoom 是往上放大，
-        # 不会露边，根本不需要预留余量。
-        #
-        # 缩放步长按总帧数摊算：写死步长会让长片段在头几秒就推到头、
-        # 剩下十几秒完全静止。
-        amount = 0.10
+        # 步长按整条素材摊算：这样「素材内时间窗」才等价于「画面景别进度」——
+        # 取靠后的时间窗 = 更近的景别，_split_static 靠的就是这个映射。
+        amount = PUSH_AMOUNT
         rate = amount / frames
+        pw, ph = int(round(width * PRE_SCALE)), int(round(height * PRE_SCALE))
         vf = (
-            f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},"
+            f"scale={pw}:{ph}:force_original_aspect_ratio=increase,"
+            f"crop={pw}:{ph},"
             f"zoompan=z='min(zoom+{rate:.8f},{1.0 + amount:.4f})':d={frames}:"
             f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={width}x{height}:fps={fps},"
             # 万相最大只给 1440×810，落到 1920×1080 是放大 —— 轻微锐化补偿一下柔化，
